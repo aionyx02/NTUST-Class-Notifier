@@ -8,3 +8,12 @@
 /dataSources.local.xml
 # Zeppelin ignored files
 /ZeppelinRemoteNotebooks/
+/copilot*
+/discord.xml
+/go.imports.xml
+/misc.xml
+/modules.xml
+/ruff.xml
+/swift-toolchain.xml
+/vcs.xml
+/inspectionProfiles/
