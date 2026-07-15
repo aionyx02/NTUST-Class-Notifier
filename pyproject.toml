@@ -1,0 +1,14 @@
+[project]
+name = "that-is-my-class"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "discord-py>=2.4.0",
+    "httpx[http2]>=0.28.1",
+    "beautifulsoup4>=4.12",
+    "python-dotenv>=1.0.1",
+    "audioop-lts>=0.2.2",
+    "pip-system-certs>=5.3",
+]
