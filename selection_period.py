@@ -1,18 +1,32 @@
-"""選課時段定義與對應連結（main.py 與 course_alert.py 共用）"""
+"""選課時段的定義與對應連結。
 
-from datetime import date
+main.py、course_alert.py 共用同一份日期，避免兩邊各存一份而失準。
+"""
 
-# 選課時段定義
-PERIOD_DEPT_SELECT = (date(2026, 6, 22), date(2026, 6, 24))  # 電選課加選
-PERIOD_OPEN_SELECT = (date(2026, 9, 7), date(2026, 9, 21))  # 全校加退選
+import datetime
+
+# 電選課加選：由系所分配名額的階段。
+PERIOD_DEPT_SELECT = (datetime.date(2026, 6, 22), datetime.date(2026, 6, 24))
+
+# 全校加退選。
+PERIOD_OPEN_SELECT = (datetime.date(2026, 9, 7), datetime.date(2026, 9, 21))
 
 DEPT_SELECT_LINK = "https://courseselection.ntust.edu.tw/First/A06/A06"
 OPEN_SELECT_LINK = "https://courseselection.ntust.edu.tw/AddAndSub/B01/B01"
 
+_PERIOD_NAMES = {"dept": "電選課加選", "open": "全校加退選"}
 
-def get_current_period(today: date | None = None) -> str:
-    """根據日期判斷目前選課時段，回傳 "dept" / "open" / "unknown"。"""
-    today = today or date.today()
+
+def get_current_period(today: datetime.date | None = None) -> str:
+    """判斷指定日期落在哪個選課時段。
+
+    Args:
+        today: 要判斷的日期，預設為今天。
+
+    Returns:
+        "dept"（電選課加選）、"open"（全校加退選）或 "unknown"。
+    """
+    today = today or datetime.date.today()
     if PERIOD_DEPT_SELECT[0] <= today <= PERIOD_DEPT_SELECT[1]:
         return "dept"
     if PERIOD_OPEN_SELECT[0] <= today <= PERIOD_OPEN_SELECT[1]:
@@ -21,18 +35,12 @@ def get_current_period(today: date | None = None) -> str:
 
 
 def get_period_name(period: str) -> str:
-    """時段代碼轉成中文名稱。"""
-    return {"dept": "電選課加選", "open": "全校加退選"}.get(period, "非選課時段")
+    """把時段代碼轉成中文名稱。
 
+    Args:
+        period: get_current_period() 的回傳值。
 
-def get_selection_link() -> str:
-    """根據時段回傳對應的選課連結"""
-    period = get_current_period()
-    if period == "dept":
-        return f"▸ **電選課加選:** {DEPT_SELECT_LINK}"
-    if period == "open":
-        return f"▸ **全校加退選:** {OPEN_SELECT_LINK}"
-    return (
-        f"▸ **電選課加選:** {DEPT_SELECT_LINK}\n"
-        f"▸ **全校加退選:** {OPEN_SELECT_LINK}"
-    )
+    Returns:
+        中文時段名稱，未知時回傳「非選課時段」。
+    """
+    return _PERIOD_NAMES.get(period, "非選課時段")

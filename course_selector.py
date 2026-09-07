@@ -1,18 +1,22 @@
-"""NTUST 選課系統自動加選 + session keepalive"""
+"""台科大選課系統的登入、自動加選與 session 維持。
+
+透過 SSO 登入後保存 cookie，供電選課加選期間送出加選請求；另外提供跨平台
+的提示音。
+"""
 
 import asyncio
+import functools
 import logging
+import pathlib
 import re
 import sqlite3
 import subprocess
 import sys
 import threading
-from functools import partial
-from pathlib import Path
-from urllib.parse import urljoin
+import urllib.parse
 
+import bs4
 import httpx
-from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +27,15 @@ BROWSER_UA = (
 
 COURSE_SELECTION_ROOT = "https://courseselection.ntust.edu.tw/"
 DEPT_SELECT_URL = "https://courseselection.ntust.edu.tw/First/A06/A06"
-DEPT_SELECT_JOIN_URL = "https://courseselection.ntust.edu.tw/First/A06/ExtraJoin"
+DEPT_SELECT_JOIN_URL = (
+    "https://courseselection.ntust.edu.tw/First/A06/ExtraJoin"
+)
 COURSE_LIST_URL = "https://courseselection.ntust.edu.tw/First/A02/A02"
 
 # 從選課頁面 HTML 中抓取已選課程代碼
-ENROLLED_COURSE_PATTERN = re.compile(r'class="table-cell">\s*([A-Z]{2}[A-Z0-9]{7})\s*<')
+ENROLLED_COURSE_PATTERN = re.compile(
+    r'class="table-cell">\s*([A-Z]{2}[A-Z0-9]{7})\s*<'
+)
 WISH_LIST_PATTERN = re.compile(
     r'<tr\s+class="data"[^>]*>\s*'
     r'<td[^>]*>\s*\d+\s*</td>\s*'
@@ -44,7 +52,7 @@ OIDC_MARKERS = (
     frozenset({"wctx"}),
 )
 
-DB_PATH = Path(__file__).parent / "cookies.sqlite3"
+DB_PATH = pathlib.Path(__file__).parent / "cookies.sqlite3"
 
 
 def _form_payload(form) -> dict[str, str]:
@@ -57,7 +65,7 @@ def _form_payload(form) -> dict[str, str]:
 def _is_login_page(resp: httpx.Response) -> bool:
     if "ssoam2.ntust.edu.tw" not in str(resp.url):
         return False
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = bs4.BeautifulSoup(resp.text, "html.parser")
     if soup.find("form", id="loginForm"):
         return True
     names = {i.get("name", "") for i in soup.find_all("input")}
@@ -65,7 +73,7 @@ def _is_login_page(resp: httpx.Response) -> bool:
 
 
 def _find_bridge_form(html: str):
-    soup = BeautifulSoup(html, "html.parser")
+    soup = bs4.BeautifulSoup(html, "html.parser")
     for form in soup.find_all("form"):
         action = (form.get("action") or "").strip().lower()
         if not action or "logout" in action:
@@ -79,7 +87,7 @@ def _find_bridge_form(html: str):
 
 
 class CookieStore:
-    def __init__(self, db_path: Path = DB_PATH):
+    def __init__(self, db_path: pathlib.Path = DB_PATH):
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS cookies "
@@ -90,7 +98,8 @@ class CookieStore:
 
     def load_into(self, account: str, client: httpx.Client) -> bool:
         rows = self._db.execute(
-            "SELECT name, value, domain, path FROM cookies WHERE account=?", (account,)
+            "SELECT name, value, domain, path FROM cookies WHERE account=?",
+            (account,),
         ).fetchall()
         if not rows:
             return False
@@ -117,7 +126,11 @@ class CookieStore:
 
 
 class CourseSelector:
-    """SSO 登入 + 電選課加選自動加選"""
+    """選課系統的 SSO 登入與加選操作。
+
+    Attributes:
+        DB_PATH: cookie 儲存位置，避免每次執行都要重新 SSO 登入。
+    """
 
     def __init__(self, student_id: str, password: str):
         self._account = student_id.strip().upper()
@@ -136,7 +149,8 @@ class CourseSelector:
             return True
         self._store.load_into(self._account, self._client)
         try:
-            resp = self._resolve_bridges(self._client.get(COURSE_SELECTION_ROOT))
+            resp = self._resolve_bridges(
+                self._client.get(COURSE_SELECTION_ROOT))
             if _is_login_page(resp):
                 logger.info("Session 過期，重新 SSO 登入...")
                 self._client.cookies.clear()
@@ -157,7 +171,11 @@ class CourseSelector:
             return False
 
     def keepalive(self) -> bool:
-        """訪問選課頁面以延長 session"""
+        """訪問選課頁面以延長 session。
+
+        Returns:
+            session 仍有效（或重新登入成功）為 True。
+        """
         try:
             resp = self._client.get(DEPT_SELECT_URL)
             if _is_login_page(resp):
@@ -172,14 +190,25 @@ class CourseSelector:
             return False
 
     def select_course(self, course_no: str) -> tuple[bool, str]:
-        """電選課加選"""
+        """送出電選課加選請求。
+
+        Args:
+            course_no: 要加選的課程代碼。
+
+        Returns:
+            (是否送出成功, 伺服器回應內容)。送出成功不代表搶到名額，
+            仍需以 verify_enrolled() 確認。
+        """
         if not self._logged_in and not self.login():
             return False, "登入失敗"
         try:
             resp = self._client.post(
                 DEPT_SELECT_JOIN_URL,
                 data={"CourseNo": course_no, "type": "3"},
-                headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+                headers={
+                    "Content-Type":
+                        "application/x-www-form-urlencoded; charset=UTF-8"
+                },
             )
             self._store.save_from(self._account, self._client)
             body = resp.text
@@ -190,7 +219,14 @@ class CourseSelector:
             return False, str(e)
 
     def verify_enrolled(self, course_no: str) -> bool:
-        """檢查課程是否已出現在已選清單中"""
+        """檢查課程是否真的出現在已選清單中。
+
+        Args:
+            course_no: 要確認的課程代碼。
+
+        Returns:
+            課程已在清單（含志願序清單）中為 True。
+        """
         if not self._logged_in and not self.login():
             return False
         try:
@@ -200,7 +236,8 @@ class CourseSelector:
             wished = WISH_LIST_PATTERN.findall(html)
             all_courses = set(enrolled + wished)
             found = course_no.upper() in all_courses
-            logger.info(f"驗證加選結果: {course_no} {'已在清單中 ✓' if found else '未在清單中 ✗'}")
+            state = "已在清單中" if found else "未在清單中"
+            logger.info("驗證加選結果: %s %s", course_no, state)
             return found
         except Exception as e:
             logger.error(f"驗證加選結果時發生錯誤: {e}")
@@ -210,7 +247,9 @@ class CourseSelector:
         self._client.close()
         self._store.close()
 
-    def _resolve_bridges(self, resp: httpx.Response, max_steps: int = 3) -> httpx.Response:
+    def _resolve_bridges(
+        self, resp: httpx.Response, max_steps: int = 3
+    ) -> httpx.Response:
         current = resp
         for _ in range(max_steps):
             if _is_login_page(current):
@@ -218,27 +257,36 @@ class CourseSelector:
             form = _find_bridge_form(current.text)
             if not form:
                 return current
-            action = urljoin(str(current.url), form.get("action"))
+            action = urllib.parse.urljoin(str(current.url), form.get("action"))
             payload = _form_payload(form)
             current = self._client.post(action, data=payload)
         return current
 
     def _submit_login(self, resp: httpx.Response) -> httpx.Response:
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = bs4.BeautifulSoup(resp.text, "html.parser")
         form = soup.find("form", id="loginForm")
         if not form:
             raise RuntimeError("找不到 SSO 登入表單")
         payload = _form_payload(form)
         payload.update(Username=self._account, Password=self._password)
         payload.setdefault("captcha", "")
-        action = urljoin(str(resp.url), form.get("action") or str(resp.url))
+        action = urllib.parse.urljoin(
+            str(resp.url), form.get("action") or str(resp.url))
         return self._client.post(action, data=payload)
 
 
 async def run_sync(func, *args):
-    """在 executor 中跑同步函式"""
+    """在 executor 中執行同步函式，避免阻塞事件迴圈。
+
+    Args:
+        func: 要執行的同步函式。
+        *args: 傳給該函式的參數。
+
+    Returns:
+        該函式的回傳值。
+    """
     loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, partial(func, *args))
+    return await loop.run_in_executor(None, functools.partial(func, *args))
 
 
 # Windows 嗶聲音型 (頻率 Hz, 長度 ms)
@@ -250,7 +298,13 @@ _WIN_BEEPS = {
 
 
 def play_sound(sound_type: str = "vacancy"):
-    """播放提示音；macOS 用系統音效、Windows 用嗶聲，其餘平台以終端機響鈴代替。"""
+    """播放提示音。
+
+    macOS 用系統音效、Windows 用嗶聲，其餘平台以終端機響鈴代替。
+
+    Args:
+        sound_type: "vacancy"、"success" 或 "failure"。
+    """
     if sys.platform == "darwin":
         sounds = {
             "vacancy": "Glass",       # 有空位
@@ -270,7 +324,8 @@ def play_sound(sound_type: str = "vacancy"):
 
         def _beep():
             try:
-                for freq, duration in _WIN_BEEPS.get(sound_type, _WIN_BEEPS["vacancy"]):
+                beeps = _WIN_BEEPS.get(sound_type, _WIN_BEEPS["vacancy"])
+                for freq, duration in beeps:
                     winsound.Beep(freq, duration)
             except Exception as e:  # 沒有喇叭或音效裝置時不要影響監控
                 logger.debug(f"播放提示音失敗: {e}")
