@@ -11,4 +11,6 @@ dependencies = [
     "python-dotenv>=1.0.1",
     "audioop-lts>=0.2.2",
     "pip-system-certs>=5.3",
+    "pynacl>=1.6.2",
+    "davey>=0.1.6",
 ]
