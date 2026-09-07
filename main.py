@@ -2,14 +2,15 @@ import asyncio
 import logging
 import os
 import sys
-from datetime import date
 
 import discord
 import dotenv
 
-from course_lookup import CourseClient, QueryPayload
+from course_filter import RuleError, parse_rules
+from course_lookup import CourseClient, QueryPayload, current_semester
 from course_selector import CourseSelector, run_sync, play_sound
 from discord_bot import DiscordBot
+from selection_period import get_current_period, get_selection_link
 
 # ========== Logger 設定 ========== #
 logging.basicConfig(
@@ -41,33 +42,6 @@ except ValueError as e:
 
 # 全域變數，用於儲存所有課程的先前人數狀態
 previous_enrollment_states = {}
-
-# 選課時段定義
-PERIOD_DEPT_SELECT = (date(2026, 6, 22), date(2026, 6, 24))  # 電選課加選
-PERIOD_OPEN_SELECT = (date(2026, 9, 7), date(2026, 9, 21))   # 全校加退選
-
-
-def get_current_period() -> str:
-    """根據日期判斷目前選課時段"""
-    today = date.today()
-    if PERIOD_DEPT_SELECT[0] <= today <= PERIOD_DEPT_SELECT[1]:
-        return "dept"
-    if PERIOD_OPEN_SELECT[0] <= today <= PERIOD_OPEN_SELECT[1]:
-        return "open"
-    return "unknown"
-
-
-def get_selection_link() -> str:
-    """根據時段回傳對應的選課連結"""
-    period = get_current_period()
-    if period == "dept":
-        return "▸ **電選課加選:** https://courseselection.ntust.edu.tw/First/A06/A06"
-    if period == "open":
-        return "▸ **全校加退選:** https://courseselection.ntust.edu.tw/AddAndSub/B01/B01"
-    return (
-        "▸ **電選課加選:** https://courseselection.ntust.edu.tw/First/A06/A06\n"
-        "▸ **全校加退選:** https://courseselection.ntust.edu.tw/AddAndSub/B01/B01"
-    )
 
 
 async def monitor_specific_courses(
@@ -207,29 +181,26 @@ async def monitor_all_courses(course_client: CourseClient, bot: DiscordBot | Non
 
 
 async def main():
-    if not LOOK_UP_CLASSES and not "1141":  # 如果沒有指定課程，也沒有預設學期，則無法運行
-        logger.error("錯誤：未設定 LOOK_UP_CLASSES，且無預設學期。請在 .env 中設定至少一門課。")
-        sys.exit(1)
-
-    # 建立 Payloads，格式: 學期&課程代碼&系所身份(可選)
+    # 規則由 course_filter 解析，新格式 `課號:CS 系所:…` 與舊格式 `學期&課號&系所` 都吃
     try:
-        payloads = []
-        course_departments: dict[str, str] = {}  # course_no -> department
-        for class_ in LOOK_UP_CLASSES:
-            parts = class_.split('&')
-            semester, course_no = parts[0], parts[1]
-            dept = parts[2] if len(parts) > 2 and parts[2] else ""
-            payloads.append(QueryPayload(Semester=semester, CourseNo=course_no))
-            if dept:
-                course_departments[course_no] = dept
-
-        if not payloads:
-            payloads.append(QueryPayload(Semester="1141"))
-            logger.info("未設定 LOOK_UP_CLASSES，將僅監控所有課程變動。")
-
-    except IndexError:
-        logger.error("LOOK_UP_CLASSES 格式錯誤，應為 '學期&課程代碼&系所(可選)'，例如 '1151&PE139A053&資訊工程系三'。")
+        rules = parse_rules(";".join(LOOK_UP_CLASSES))
+    except RuleError as e:
+        logger.error(f"LOOK_UP_CLASSES 規則錯誤：{e}")
         sys.exit(1)
+
+    default_semester = current_semester()
+    payloads = []
+    course_departments: dict[str, str] = {}  # course_no -> department
+    for rule in rules:
+        semester = rule.semester or default_semester
+        for course_no in rule.codes:
+            payloads.append(QueryPayload(Semester=semester, CourseNo=course_no))
+            if rule.dept:
+                course_departments[course_no] = rule.dept
+
+    if not payloads:
+        payloads.append(QueryPayload(Semester=default_semester))
+        logger.info("未設定 LOOK_UP_CLASSES 課程代碼，將僅監控所有課程變動。")
 
     course_client = CourseClient(payloads=payloads, course_departments=course_departments)
 
