@@ -1,6 +1,6 @@
 """選課時段的定義與對應連結。
 
-main.py、course_alert.py 共用同一份日期，避免兩邊各存一份而失準。
+notifier 與 alert 共用同一份日期，避免兩邊各存一份而失準。
 """
 
 import datetime

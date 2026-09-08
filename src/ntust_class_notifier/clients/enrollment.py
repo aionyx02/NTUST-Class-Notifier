@@ -1,7 +1,7 @@
-"""台科大選課系統的登入、自動加選與 session 維持。
+"""台科大選課系統的登入、加選與 session 維持。
 
-透過 SSO 登入後保存 cookie，供電選課加選期間送出加選請求；另外提供跨平台
-的提示音。
+透過 SSO 登入後把 cookie 存進 config.data_dir()，供電選課加選期間送出加選
+請求。只有 ntust-notify 在設定了帳密時才會用到這一支。
 """
 
 import asyncio
@@ -10,38 +10,49 @@ import logging
 import pathlib
 import re
 import sqlite3
-import subprocess
-import sys
-import threading
 import urllib.parse
 
 import bs4
 import httpx
 
+from ntust_class_notifier import config
+
 logger = logging.getLogger(__name__)
+
 
 BROWSER_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36"
 )
 
+
 COURSE_SELECTION_ROOT = "https://courseselection.ntust.edu.tw/"
+
+
 DEPT_SELECT_URL = "https://courseselection.ntust.edu.tw/First/A06/A06"
+
+
 DEPT_SELECT_JOIN_URL = (
     "https://courseselection.ntust.edu.tw/First/A06/ExtraJoin"
 )
+
+
 COURSE_LIST_URL = "https://courseselection.ntust.edu.tw/First/A02/A02"
+
 
 # 從選課頁面 HTML 中抓取已選課程代碼
 ENROLLED_COURSE_PATTERN = re.compile(
     r'class="table-cell">\s*([A-Z]{2}[A-Z0-9]{7})\s*<'
 )
+
+
 WISH_LIST_PATTERN = re.compile(
     r'<tr\s+class="data"[^>]*>\s*'
     r'<td[^>]*>\s*\d+\s*</td>\s*'
     r'<td[^>]*>\s*([A-Z]{2}[A-Z0-9]{7})\s*</td>',
     re.DOTALL,
 )
+
 
 OIDC_MARKERS = (
     frozenset({"code", "state", "iss"}),
@@ -51,8 +62,6 @@ OIDC_MARKERS = (
     frozenset({"wresult"}),
     frozenset({"wctx"}),
 )
-
-DB_PATH = pathlib.Path(__file__).parent / "cookies.sqlite3"
 
 
 def _form_payload(form) -> dict[str, str]:
@@ -87,7 +96,13 @@ def _find_bridge_form(html: str):
 
 
 class CookieStore:
-    def __init__(self, db_path: pathlib.Path = DB_PATH):
+    def __init__(self, db_path: pathlib.Path | None = None):
+        """開啟 cookie 資料庫。
+
+        Args:
+            db_path: 資料庫位置，None 代表用 config.data_dir() 下的預設檔。
+        """
+        db_path = db_path or config.data_dir() / "cookies.sqlite3"
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         self._db.execute(
             "CREATE TABLE IF NOT EXISTS cookies "
@@ -128,8 +143,8 @@ class CookieStore:
 class CourseSelector:
     """選課系統的 SSO 登入與加選操作。
 
-    Attributes:
-        DB_PATH: cookie 儲存位置，避免每次執行都要重新 SSO 登入。
+    登入後的 cookie 會存進 config.data_dir()，避免每次執行都要重新 SSO
+    登入。
     """
 
     def __init__(self, student_id: str, password: str):
@@ -186,7 +201,7 @@ class CourseSelector:
             logger.debug("Session keepalive OK")
             return True
         except Exception as e:
-            logger.error(f"Keepalive 失敗: {e}")
+            logger.error("Keepalive 失敗: %s", e)
             return False
 
     def select_course(self, course_no: str) -> tuple[bool, str]:
@@ -212,10 +227,11 @@ class CourseSelector:
             )
             self._store.save_from(self._account, self._client)
             body = resp.text
-            logger.info(f"加選 {course_no} 回應: {resp.status_code} | {body[:200]}")
+            logger.info("加選 %s 回應: %s | %s",
+                        course_no, resp.status_code, body[:200])
             return resp.is_success, body
         except Exception as e:
-            logger.error(f"加選 {course_no} 發生錯誤: {e}")
+            logger.error("加選 %s 發生錯誤: %s", course_no, e)
             return False, str(e)
 
     def verify_enrolled(self, course_no: str) -> bool:
@@ -240,7 +256,7 @@ class CourseSelector:
             logger.info("驗證加選結果: %s %s", course_no, state)
             return found
         except Exception as e:
-            logger.error(f"驗證加選結果時發生錯誤: {e}")
+            logger.error("驗證加選結果時發生錯誤: %s", e)
             return False
 
     def close(self):
@@ -287,51 +303,3 @@ async def run_sync(func, *args):
     """
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(None, functools.partial(func, *args))
-
-
-# Windows 嗶聲音型 (頻率 Hz, 長度 ms)
-_WIN_BEEPS = {
-    "vacancy": [(880, 150), (1175, 150), (1568, 300)],   # 有空位：上行
-    "success": [(1047, 120), (1319, 120), (1568, 400)],  # 加選成功：歡呼
-    "failure": [(440, 250), (330, 400)],                 # 加選失敗：下行
-}
-
-
-def play_sound(sound_type: str = "vacancy"):
-    """播放提示音。
-
-    macOS 用系統音效、Windows 用嗶聲，其餘平台以終端機響鈴代替。
-
-    Args:
-        sound_type: "vacancy"、"success" 或 "failure"。
-    """
-    if sys.platform == "darwin":
-        sounds = {
-            "vacancy": "Glass",       # 有空位
-            "success": "Hero",        # 加選成功
-            "failure": "Sosumi",      # 加選失敗
-        }
-        sound_name = sounds.get(sound_type, "Glass")
-        subprocess.Popen(
-            ["afplay", f"/System/Library/Sounds/{sound_name}.aiff"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return
-
-    if sys.platform == "win32":
-        import winsound
-
-        def _beep():
-            try:
-                beeps = _WIN_BEEPS.get(sound_type, _WIN_BEEPS["vacancy"])
-                for freq, duration in beeps:
-                    winsound.Beep(freq, duration)
-            except Exception as e:  # 沒有喇叭或音效裝置時不要影響監控
-                logger.debug(f"播放提示音失敗: {e}")
-
-        # winsound.Beep 是阻塞的，丟到背景執行緒避免卡住事件迴圈
-        threading.Thread(target=_beep, daemon=True).start()
-        return
-
-    print("\a", end="", flush=True)

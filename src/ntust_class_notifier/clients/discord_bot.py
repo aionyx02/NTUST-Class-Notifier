@@ -130,7 +130,8 @@ class DiscordBot(discord.Client):
             return self._remember(target_id, user, "使用者私訊")
 
         logger.error(
-            "%s 不是機器人看得到的伺服器或頻道，也不是有效的使用者 ID，已略過。",
+            "%s 不是機器人看得到的伺服器或頻道，"
+            "也不是有效的使用者 ID，已略過。",
             target_id,
         )
         return None
@@ -230,7 +231,8 @@ class DiscordBot(discord.Client):
 
         for channel in ordered:
             if me is None:
-                return channel  # 查不到自己的身分就先試，權限不足時會在送出時報錯。
+                # 查不到自己的身分就先試，權限不足時送出才會報錯。
+                return channel
             allowed = channel.permissions_for(me)
             if allowed.view_channel and allowed.send_messages:
                 return channel
