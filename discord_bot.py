@@ -1,7 +1,8 @@
 """Discord Bot 的連線與訊息傳送。
 
-收件對象可以是使用者（私訊）或文字頻道；同一個 key 的訊息會先刪舊的再送
-新的，所以聊天室裡不會愈積愈多。
+收件對象只要填 ID 就好，程式會自動判斷那是伺服器、文字頻道還是使用者：
+填伺服器就自動挑一個機器人發得了言的文字頻道、填使用者就走私訊。同一個
+key 的訊息會先刪舊的再送新的，所以聊天室裡不會愈積愈多。
 """
 
 import asyncio
@@ -16,7 +17,7 @@ class DiscordBot(discord.Client):
     """負責登入 Discord 並送出課程通知。
 
     Attributes:
-        target_user_ids: 收件對象的 ID，可為使用者或頻道。
+        target_ids: 收件對象的 ID，可為伺服器、文字頻道或使用者。
         startup_message: 登入完成後要送出的第一則訊息。
         message_key: 啟動訊息使用的 key，之後的更新用同一個 key 取代它。
         ready_event: on_ready 完成後才允許送訊息。
@@ -28,7 +29,7 @@ class DiscordBot(discord.Client):
         self,
         *,
         intents: discord.Intents,
-        target_user_ids: list[int],
+        target_ids: list[int],
         startup_message: str,
         message_key: str = "狀態",
     ):
@@ -36,12 +37,12 @@ class DiscordBot(discord.Client):
 
         Args:
             intents: discord.py 的 intents 設定。
-            target_user_ids: 收件對象的 ID 列表。
+            target_ids: 收件對象的 ID 列表，伺服器、頻道或使用者都可以。
             startup_message: 登入完成後送出的訊息。
             message_key: 所有狀態更新共用的 key。
         """
         super().__init__(intents=intents)
-        self.target_user_ids = tuple(target_user_ids)
+        self.target_ids = tuple(target_ids)
         self.startup_message = startup_message
         self.message_key = message_key
         self.ready_event = asyncio.Event()
@@ -70,7 +71,7 @@ class DiscordBot(discord.Client):
             await self.delete_sent(key)
 
         sent: list[discord.Message] = []
-        for target_id in self.target_user_ids:
+        for target_id in self.target_ids:
             target = await self.resolve_target(target_id)
             if target is None:
                 continue
@@ -87,10 +88,11 @@ class DiscordBot(discord.Client):
     async def resolve_target(
         self, target_id: int
     ) -> discord.abc.Messageable | None:
-        """把設定的 ID 解析成可以收訊息的對象。
+        """自動判斷 ID 的種類，並轉成可以收訊息的對象。
 
-        頻道 ID 會發到該頻道、使用者 ID 會發私訊。伺服器 ID 不能收訊息，
-        這時直接把該伺服器的頻道 ID 列出來，省得使用者自己找。
+        依序判斷伺服器、文字頻道、使用者：伺服器本身不能收訊息，所以會自動
+        挑一個機器人發得了言的文字頻道；頻道就直接發到該頻道；使用者則發
+        私訊。結果會快取，之後不再重新判斷。
 
         Args:
             target_id: .env 設定的 ID。
@@ -101,19 +103,37 @@ class DiscordBot(discord.Client):
         if target_id in self.targets:
             return self.targets[target_id]
 
-        target = self.get_channel(target_id)
-        if target is None:
-            target = await self._fetch_or_none(self.fetch_channel, target_id)
-        if target is None:
-            target = await self._fetch_or_none(self.fetch_user, target_id)
+        guild = await self._find_guild(target_id)
+        if guild is not None:
+            channel = await self._pick_channel(guild)
+            if channel is None:
+                logger.error(
+                    "%s 是伺服器「%s」，但裡面沒有機器人能發言的文字頻道。"
+                    "請確認邀請時給了「發送訊息」權限，或改填頻道 ID。",
+                    target_id, guild.name,
+                )
+                return None
+            return self._remember(
+                target_id, channel, f"伺服器「{guild.name}」的 #{channel.name}"
+            )
 
-        if target is None:
-            self._log_unresolved(target_id)
+        channel = await self._find_channel(target_id)
+        if isinstance(channel, discord.abc.Messageable):
+            return self._remember(target_id, channel, "文字頻道")
+        if channel is not None:
+            logger.error("%s 是不能收訊息的頻道（%s），請改填文字頻道 ID。",
+                         target_id, type(channel).__name__)
             return None
 
-        self.targets[target_id] = target
-        logger.info("通知對象 %s 解析為：%s", target_id, target)
-        return target
+        user = await self._fetch_or_none(self.fetch_user, target_id)
+        if user is not None:
+            return self._remember(target_id, user, "使用者私訊")
+
+        logger.error(
+            "%s 不是機器人看得到的伺服器或頻道，也不是有效的使用者 ID，已略過。",
+            target_id,
+        )
+        return None
 
     async def delete_sent(self, key: str) -> None:
         """刪掉某個 key 之前送出的訊息。
@@ -130,39 +150,104 @@ class DiscordBot(discord.Client):
             except discord.DiscordException as error:
                 logger.warning("刪除 %s 的舊訊息失敗：%s", key, error)
 
+    def _remember(
+        self, target_id: int, target: discord.abc.Messageable, kind: str
+    ) -> discord.abc.Messageable:
+        """記住解析結果並回報判斷成什麼。
+
+        Args:
+            target_id: .env 設定的 ID。
+            target: 解析出來的收件對象。
+            kind: 判斷結果的中文說明，寫進 log 讓使用者確認。
+
+        Returns:
+            傳入的收件對象。
+        """
+        self.targets[target_id] = target
+        logger.info("通知對象 %s 判定為%s", target_id, kind)
+        return target
+
+    async def _find_guild(self, target_id: int) -> discord.Guild | None:
+        """查這個 ID 是不是機器人已加入的伺服器。
+
+        Args:
+            target_id: 要判斷的 ID。
+
+        Returns:
+            對應的伺服器，或 None。
+        """
+        guild = self.get_guild(target_id)
+        if guild is not None:
+            return guild
+        return await self._fetch_or_none(self.fetch_guild, target_id)
+
+    async def _find_channel(self, target_id: int):
+        """查這個 ID 是不是機器人看得到的頻道。
+
+        Args:
+            target_id: 要判斷的 ID。
+
+        Returns:
+            對應的頻道；找不到時回傳 None。分類、語音等不能收訊息的頻道也
+            會回傳，由呼叫端判斷並提示。
+        """
+        channel = self.get_channel(target_id)
+        if channel is None:
+            channel = await self._fetch_or_none(self.fetch_channel, target_id)
+        return channel
+
+    async def _pick_channel(
+        self, guild: discord.Guild
+    ) -> discord.TextChannel | None:
+        """從伺服器裡挑一個機器人發得了言的文字頻道。
+
+        優先用伺服器設定的系統頻道，其次照頻道順序找第一個有權限的。
+
+        Args:
+            guild: 要挑頻道的伺服器。
+
+        Returns:
+            可以發言的文字頻道；都沒有權限時回傳 None。
+        """
+        channels = list(guild.text_channels)
+        if not channels:
+            # fetch_guild 拿到的伺服器沒有頻道快取，要再抓一次。
+            fetched = await self._fetch_or_none(guild.fetch_channels) or []
+            channels = [
+                channel for channel in fetched
+                if isinstance(channel, discord.TextChannel)
+            ]
+        if not channels:
+            return None
+
+        me = guild.me
+        if me is None and self.user is not None:
+            me = await self._fetch_or_none(guild.fetch_member, self.user.id)
+
+        ordered = sorted(channels, key=lambda channel: channel.position)
+        if guild.system_channel in channels:
+            ordered.insert(0, guild.system_channel)
+
+        for channel in ordered:
+            if me is None:
+                return channel  # 查不到自己的身分就先試，權限不足時會在送出時報錯。
+            allowed = channel.permissions_for(me)
+            if allowed.view_channel and allowed.send_messages:
+                return channel
+        return None
+
     @staticmethod
-    async def _fetch_or_none(fetch, target_id: int):
+    async def _fetch_or_none(fetch, *args):
         """呼叫 discord.py 的 fetch_* 並把錯誤轉成 None。
 
         Args:
-            fetch: fetch_channel 或 fetch_user。
-            target_id: 要查的 ID。
+            fetch: fetch_guild、fetch_channel、fetch_user 等方法。
+            *args: 傳給該方法的參數。
 
         Returns:
             查到的對象，或 None。
         """
         try:
-            return await fetch(target_id)
+            return await fetch(*args)
         except discord.DiscordException:
             return None
-
-    def _log_unresolved(self, target_id: int) -> None:
-        """記錄無法解析的 ID，並在是伺服器 ID 時提示可用的頻道。
-
-        Args:
-            target_id: 無法解析的 ID。
-        """
-        guild = self.get_guild(target_id)
-        if guild is None:
-            logger.error("%s 不是看得到的頻道，也不是有效的使用者 ID，已略過。",
-                         target_id)
-            return
-
-        channels = "、".join(
-            f"#{channel.name}={channel.id}" for channel in guild.text_channels
-        )
-        logger.error(
-            "%s 是伺服器「%s」的 ID，伺服器不能直接收訊息。"
-            "請改填頻道 ID 或你自己的使用者 ID。可用的文字頻道：%s",
-            target_id, guild.name, channels or "（沒有看得到的文字頻道）",
-        )

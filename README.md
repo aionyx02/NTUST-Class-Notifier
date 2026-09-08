@@ -54,14 +54,14 @@ uv sync
 | `LOOK_UP_CLASSES` | ✅ | 篩選規則，格式 `欄位:值`，多條以 `;` 分隔（見下方「篩選規則」）。舊格式 `學期&課程代碼&系所` 仍可用。 |
 | `LOOK_UP_CLASSES_1`, `_2`… | ⬜ | 想一行寫一條規則時用；會與 `LOOK_UP_CLASSES` 合併。 |
 | `DISCORD_BOT_TOKEN` | ⬜ | Discord Bot Token；未設定則不啟動 Bot、不發通知。 |
-| `DISCORD_TARGET_USER_IDS` | ⬜ | 收通知的**使用者 ID**（私訊）或**頻道 ID**（發到伺服器頻道），多個以 `;` 分隔。 |
+| `DISCORD_TARGET_IDS` | ⬜ | 收通知的 ID，多個以 `;` 分隔。填**伺服器 ID**會自動挑一個能發言的文字頻道、**頻道 ID** 發到該頻道、**使用者 ID** 發私訊；舊名稱 `DISCORD_TARGET_USER_IDS` 仍可用。 |
 
 `.env` 範例：
 
 ```dotenv
 LOOK_UP_CLASSES=課號:CS 學制:大學部; 課號:PE139A053 系所:資訊工程系三
 DISCORD_BOT_TOKEN=r9mfsU...
-DISCORD_TARGET_USER_IDS=810822763601461318;1278934756926423052
+DISCORD_TARGET_IDS=810822763601461318;1278934756926423052
 ```
 
 或直接複製專案內的範例檔：`cp .env.example .env`
@@ -78,7 +78,7 @@ Discord 通知的行為：
 
 - **永遠只有一則訊息** — 有空位的課程集合有變動時，先刪掉舊訊息再送一則新的狀態，不會愈積愈多。
 - **格式與終端機一致** — 等寬欄位包在程式碼區塊裡（課號／課名／老師／節次／人數／剩餘）。
-- **收件對象** — `DISCORD_TARGET_USER_IDS` 填使用者 ID 就發私訊、填頻道 ID 就發到該頻道；填成伺服器 ID 會在 log 印出可用的頻道 ID。
+- **收件對象自動判斷** — `DISCORD_TARGET_IDS` 只要填 ID：伺服器 ID 會自動挑一個機器人發得了言的文字頻道（優先系統頻道）、頻道 ID 發到該頻道、使用者 ID 發私訊，判斷結果會寫在啟動 log。
 
 ## 篩選規則
 
@@ -172,7 +172,7 @@ uv run course_alert.py                                   # 讀 .env；.env 也�
 
 ## 常見問題
 
-1. **沒有收到 Discord 通知？** — 確認已設定 `DISCORD_BOT_TOKEN` 與 `DISCORD_TARGET_USER_IDS`，且 Bot 與該使用者共享伺服器、使用者允許陌生私訊。
+1. **沒有收到 Discord 通知？** — 確認已設定 `DISCORD_BOT_TOKEN` 與 `DISCORD_TARGET_IDS`。啟動 log 會印出「通知對象 … 判定為 …」，沒有這一行就代表 ID 不對；填使用者 ID 時 Bot 需與該使用者共享伺服器且對方允許陌生私訊，填伺服器 ID 時 Bot 需要「發送訊息」權限。
 2. **如何調整查詢頻率？** — 兩支終端機腳本用 `-i` 指定每輪週期；`main.py` 則調整各任務的 `asyncio.sleep(...)` 秒數。
 3. **規則寫了卻沒作用？** — 啟動時的逐條回顯會顯示每條規則命中幾門；`→ 0 門` 就代表那條沒抓到東西。
 4. **遇到 429 / Too Many Requests** — 請求過於頻繁被限流，拉長 `-i` 即可；規則涵蓋太多課程時週期也會自動放寬。

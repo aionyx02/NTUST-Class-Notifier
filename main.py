@@ -8,6 +8,7 @@ import asyncio
 import datetime
 import logging
 import os
+import re
 import sys
 import time
 
@@ -47,14 +48,31 @@ STARTUP_LIST_LIMIT = 15
 # 監控的最短週期；查詢比它久時會自動放寬成「查詢耗時 × 2」。
 MIN_INTERVAL = 3.0
 
+_SPLIT_IDS = re.compile(r"[;,\s]+")
+
+
+def parse_target_ids(raw: str) -> list[int]:
+    """把 .env 的收件對象字串拆成 ID 列表。
+
+    Args:
+        raw: 以 ;、, 或空白分隔的 ID 字串。
+
+    Returns:
+        ID 列表，順序與設定相同。
+
+    Raises:
+        ValueError: 其中有非數字的內容。
+    """
+    return [int(token) for token in _SPLIT_IDS.split(raw.strip()) if token]
+
+
 try:
-    _target_ids = os.environ.get("DISCORD_TARGET_USER_IDS", "")
-    DISCORD_TARGET_USER_IDS = [
-        int(value) for value in _target_ids.split(";") if value
-    ]
+    DISCORD_TARGET_IDS = parse_target_ids(
+        os.environ.get("DISCORD_TARGET_IDS")
+        or os.environ.get("DISCORD_TARGET_USER_IDS", "")
+    )
 except ValueError as _error:
-    logger.error("DISCORD_TARGET_USER_IDS 格式錯誤，ID 必須是純數字: %s",
-                 _error)
+    logger.error("DISCORD_TARGET_IDS 格式錯誤，ID 必須是純數字：%s", _error)
     sys.exit(1)
 
 LOOK_UP_CLASSES = course_filter.rules_from_env()
@@ -363,28 +381,26 @@ async def login_selector() -> course_selector.CourseSelector | None:
     return None
 
 
-def start_bot(startup_message: str) -> discord_bot.DiscordBot | None:
-    """視設定啟動 Discord Bot。
+def create_bot(startup_message: str) -> discord_bot.DiscordBot | None:
+    """視設定建立 Discord Bot。
 
     Args:
         startup_message: 登入完成後要送出的訊息。
 
     Returns:
-        已排程啟動的 Bot；沒設定 token 或收件對象時回傳 None。
+        建好但尚未連線的 Bot；沒設定 token 或收件對象時回傳 None。
     """
-    if not (DISCORD_BOT_TOKEN and DISCORD_TARGET_USER_IDS):
-        logger.warning("未提供 DISCORD_BOT_TOKEN 或 DISCORD_TARGET_USER_IDS，"
+    if not (DISCORD_BOT_TOKEN and DISCORD_TARGET_IDS):
+        logger.warning("未提供 DISCORD_BOT_TOKEN 或 DISCORD_TARGET_IDS，"
                        "將不會發送 Discord 通知。")
         return None
 
-    bot = discord_bot.DiscordBot(
+    return discord_bot.DiscordBot(
         intents=discord.Intents.default(),
-        target_user_ids=DISCORD_TARGET_USER_IDS,
+        target_ids=DISCORD_TARGET_IDS,
         startup_message=startup_message,
         message_key=STATUS_KEY,
     )
-    asyncio.create_task(bot.start(DISCORD_BOT_TOKEN))
-    return bot
 
 
 async def main() -> None:
@@ -410,7 +426,7 @@ async def main() -> None:
     initial = None
     if LOOK_UP_CLASSES:
         initial = await course_filter.search(client, rules, semester)
-    bot = start_bot(startup_message_for(rules, initial, semester, selector))
+    bot = create_bot(startup_message_for(rules, initial, semester, selector))
 
     tasks = []
     if LOOK_UP_CLASSES:
@@ -422,6 +438,10 @@ async def main() -> None:
     if not tasks:
         logger.error("未設定 LOOK_UP_CLASSES，沒有任何可監控的課程。")
         return
+
+    if bot:
+        # 一起 gather 才會保留 task 參考，Bot 斷線或 token 錯誤也才看得到。
+        tasks.append(asyncio.create_task(bot.start(DISCORD_BOT_TOKEN)))
 
     await asyncio.gather(*tasks)
 
