@@ -1,5 +1,6 @@
 out/
-that-is-my-class.iml
+.idea/*.iml
+cookies.sqlite3
 
 ### Python template
 # Byte-compiled / optimized / DLL files
