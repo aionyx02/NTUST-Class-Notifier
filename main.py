@@ -1,6 +1,6 @@
 """主入口：讀取 .env 的篩選規則，監控課程空位並透過 Discord 通知。
 
-Discord 通知採「單一訊息」模式：有空位的課程集合有變動時，先刪掉舊訊息再
+Discord 通知採「單一訊息」模式：任何一門課的人數有變動時，先刪掉舊訊息再
 送一則新的，所以聊天室裡永遠只有一則最新狀態。
 """
 
@@ -21,6 +21,8 @@ import course_selector
 import course_watch
 import discord_bot
 import selection_period
+
+course_watch.setup_terminal()  # 先把主控台切成 UTF-8，log 的中文才不會亂碼。
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,8 +47,14 @@ STATUS_KEY = "狀態"
 # 啟動訊息最多列幾門課。
 STARTUP_LIST_LIMIT = 15
 
+# 看板最多列幾筆人數變動。
+CHANGE_LIST_LIMIT = 12
+
 # 監控的最短週期；查詢比它久時會自動放寬成「查詢耗時 × 2」。
 MIN_INTERVAL = 3.0
+
+# 完全沒有變動時，最多隔這麼久重送一次看板，讓時間戳不會停在啟動當下。
+HEARTBEAT_SECONDS = 300.0
 
 _SPLIT_IDS = re.compile(r"[;,\s]+")
 
@@ -112,9 +120,65 @@ def code_block(lines: list[str]) -> str:
     return f"```diff\n{body}\n```"
 
 
+def change_line(old: course_lookup.Course, new: course_lookup.Course) -> str:
+    """組出一行人數變動，格式與終端機監看一致。
+
+    Args:
+        old: 上一輪的課程狀態。
+        new: 這一輪的課程狀態。
+
+    Returns:
+        以 "-"（被選走）、"+"（有人退選）或 "  "（只調整名額）開頭的一行。
+    """
+    delta = new.cur_member - old.cur_member
+    if delta == 0:
+        return (
+            f"  {course_watch.format_course(new)} "
+            f"{new.cur_member}/{new.member_limit}  "
+            f"名額由 {old.member_limit} 調整為 {new.member_limit}"
+        )
+
+    taken = delta > 0
+    tail = f"剩 {new.vacancy}" if new.vacancy > 0 else "額滿"
+    if new.member_limit != old.member_limit:
+        tail += f"，上限 {old.member_limit} → {new.member_limit}"
+    return (
+        f"{'-' if taken else '+'} {course_watch.format_course(new)} "
+        f"{old.cur_member} → {new.cur_member}/{new.member_limit} "
+        f"({delta:+d})  {'被選走' if taken else '有人退選'}，{tail}"
+    )
+
+
+def collect_changes(
+    previous: dict[str, course_lookup.Course],
+    current: dict[str, course_lookup.Course],
+) -> list[str]:
+    """比對前後兩輪的查詢結果，列出所有人數變動。
+
+    Args:
+        previous: 上一輪的 {課號: 課程}。
+        current: 這一輪的 {課號: 課程}。
+
+    Returns:
+        每筆變動一行（已帶好 diff 前綴），沒有變動時為空列表。
+    """
+    lines: list[str] = []
+    for course_no, course in current.items():
+        old = previous.get(course_no)
+        if old is None:
+            lines.append(f"  {course_line(course)}  新增課程")
+        elif (course.cur_member != old.cur_member
+              or course.member_limit != old.member_limit):
+            lines.append(change_line(old, course))
+
+    for course_no in sorted(previous.keys() - current.keys()):
+        lines.append(f"  {course_line(previous[course_no])}  已從查詢結果消失")
+    return lines
+
+
 def board_message(
     vacant: list[tuple[course_lookup.Course, str]],
-    taken: list[course_lookup.Course],
+    changes: list[str],
     watched: int,
     semester: str,
     notes: list[str],
@@ -123,7 +187,7 @@ def board_message(
 
     Args:
         vacant: 有空位的 (課程, 系所名額說明)，顯示為綠色。
-        taken: 這一輪剛被別人選走的課程，顯示為紅色。
+        changes: 這一輪的人數變動，已由 collect_changes() 上好前綴。
         watched: 這一輪監控的課程總數。
         semester: 這次查詢的學期。
         notes: 額外要附上的說明，例如自動加選結果。
@@ -142,10 +206,11 @@ def board_message(
     else:
         lines = [f"- 目前沒有空位（{now} 更新）"]
 
-    if taken:
-        lines.append("")
-        for course in taken:
-            lines.append(f"- {course_line(course)}  名額被選走")
+    if changes:
+        lines += ["", f"  這一輪的人數變動 {len(changes)} 筆"]
+        lines += changes[:CHANGE_LIST_LIMIT]
+        if len(changes) > CHANGE_LIST_LIMIT:
+            lines.append(f"  …等共 {len(changes)} 筆")
 
     lines += ["", f"  監看 {watched} 門課程・學期 {semester}"]
 
@@ -191,7 +256,7 @@ def startup_message_for(
     if selector:
         parts.append("自動加選已啟用（電選課加選期間偵測到空位將自動送出）")
     parts.append(
-        "有空位的課程有變動時才更新，這則訊息會被直接取代，聊天室永遠只有一則。"
+        "人數一有變動就更新，這則訊息會被直接取代，聊天室永遠只有一則。"
     )
     return "\n".join(parts)
 
@@ -276,10 +341,11 @@ async def monitor_specific_courses(
     bot: discord_bot.DiscordBot | None,
     selector: course_selector.CourseSelector | None,
 ) -> None:
-    """監控規則命中的課程是否有空位。
+    """監控規則命中的課程人數。
 
-    規則裡的課號是前綴，所以一條規則可能命中很多門課，全部都要監控。有空位
-    的課程集合有變動時才刪舊訊息、重送一則新的狀態。
+    規則裡的課號是前綴，所以一條規則可能命中很多門課，全部都要監控。只要
+    任何一門課的人數有變動就重送看板；完全沒有變動時也會定時重送一次，讓
+    訊息上的時間戳不會停在啟動當下。
 
     Args:
         client: 課程查詢客戶端。
@@ -288,55 +354,58 @@ async def monitor_specific_courses(
         bot: Discord Bot，None 代表只輸出到終端機。
         selector: 已登入的選課系統客戶端，None 代表不自動加選。
     """
-    previous_vacant: set[str] | None = None
+    previous: dict[str, course_lookup.Course] = {}
+    previous_vacant: set[str] = set()
+    # 從現在起算心跳，啟動訊息才不會馬上被看板取代。
+    last_board = time.monotonic()
+    rounds = 0
 
     while True:
         try:
             started = time.monotonic()
             result = await course_filter.search(client, rules, semester)
             if result.failed:
+                # 查詢失敗時不比對，否則會把「查不到」誤判成人數歸零。
                 logger.warning("查詢失敗：%s，本輪略過", "、".join(result.failed))
                 await asyncio.sleep(MIN_INTERVAL)
                 continue
 
+            rounds += 1
+            current = {
+                match.course.course_no: match.course
+                for match in result.matches
+            }
             vacant = await collect_vacant(client, result, semester)
             current_vacant = {course.course_no for course, _ in vacant}
 
-            if previous_vacant is None or current_vacant != previous_vacant:
-                new_ones = sorted(current_vacant - (previous_vacant or set()))
-                if new_ones:
-                    course_selector.play_sound("vacancy")
-                    logger.info("偵測到空位: %s", "、".join(new_ones))
+            changes = collect_changes(previous, current) if previous else []
+            for line in changes:
+                logger.info("%s", line.strip())
 
-                # 上一輪有空位、這一輪沒有的，就是剛被別人選走。
-                by_no = {
-                    match.course.course_no: match.course
-                    for match in result.matches
-                }
-                taken = [
-                    by_no[course_no]
-                    for course_no in sorted(
-                        (previous_vacant or set()) - current_vacant)
-                    if course_no in by_no
-                ]
-                if taken:
-                    logger.info("名額被選走: %s",
-                                "、".join(course.course_no for course in taken))
+            new_ones = sorted(current_vacant - previous_vacant)
+            if new_ones:
+                course_selector.play_sound("vacancy")
+                logger.info("偵測到空位：%s", "、".join(new_ones))
 
-                notes = []
-                if (selector
-                        and selection_period.get_current_period() == "dept"):
-                    for course_no in new_ones:
-                        notes.append(await enroll(selector, course_no))
+            notes = []
+            if selector and selection_period.get_current_period() == "dept":
+                for course_no in new_ones:
+                    notes.append(await enroll(selector, course_no))
 
-                if bot:
-                    await bot.send_dm(
-                        board_message(vacant, taken, len(result.matches),
-                                      semester, notes),
-                        key=STATUS_KEY,
-                    )
+            stale = time.monotonic() - last_board >= HEARTBEAT_SECONDS
+            if bot and (changes or notes or stale
+                        or current_vacant != previous_vacant):
+                await bot.send_dm(
+                    board_message(vacant, changes, len(result.matches),
+                                  semester, notes),
+                    key=STATUS_KEY,
+                )
+                last_board = time.monotonic()
 
+            previous = current
             previous_vacant = current_vacant
+            logger.debug("第 %d 輪：%d 門課程、%d 門有空位、%d 筆變動",
+                         rounds, len(current), len(vacant), len(changes))
 
             # 查詢比週期還久時（規則範圍很大）自動放寬，免得請求疊在一起。
             elapsed = time.monotonic() - started
