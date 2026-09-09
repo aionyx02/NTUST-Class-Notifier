@@ -120,11 +120,23 @@ jobs:
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
           git add pyproject.toml
-          # [skip ci] 只是省一次 CI；就算再跑一輪，這個 commit 不是 feat/
-          # fix，版本計算會直接判定不用發布。
-          git commit -m "chore(release): $TAG [skip ci]"
+          # pyproject 可能本來就已經是這個版本（例如第一次發布時人工先對
+          # 齊過），這時沒有東西可以 commit，但 tag 還是要打。
+          if git diff --cached --quiet; then
+            echo "pyproject.toml 已經是 $VERSION，跳過版本 commit"
+          else
+            # [skip ci] 只是省一次 CI；就算再跑一輪，這個 commit 不是
+            # feat/fix，版本計算會直接判定不用發布。
+            git commit -m "chore(release): $TAG [skip ci]"
+            git push origin HEAD:main
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" \
+              >/dev/null 2>&1; then
+            echo "::error::$TAG 已經存在，請改用別的版本號"
+            exit 1
+          fi
           git tag -a "$TAG" -m "$TAG"
-          git push origin HEAD:main
           git push origin "$TAG"
 
       - name: 產生發布用的 ntust.ps1
