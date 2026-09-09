@@ -1,6 +1,6 @@
 [project]
 name = "ntust-class-notifier"
-version = "0.3.0"
+version = "0.1.0"
 description = "監控台科大課程空額，支援終端機監看、搶課提醒與 Discord 通知"
 readme = "README.md"
 requires-python = ">=3.13"

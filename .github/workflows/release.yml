@@ -1,0 +1,179 @@
+name: Release
+
+# 版本規則：每個 feat commit 讓次版號 +0.1.0、每個 fix commit 讓修訂號
+# +0.0.1，兩者累加。主版號（1.0.0 這種）永遠不會自動跳，只能由人從
+# Actions 頁面手動觸發並填版本號。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "手動指定版本，例如 1.0.0；留空則照 commit 自動計算"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 計算版本
+        id: version
+        env:
+          MANUAL: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          # 還沒有任何 tag 時，第一次發布就是這個版本。
+          BASE_VERSION="0.1.0"
+
+          last_tag=$(git tag --list 'v*' --sort=-v:refname | head -n1)
+          echo "最後一個 tag：${last_tag:-（沒有）}"
+
+          if [ -n "$MANUAL" ]; then
+            if ! echo "$MANUAL" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::版本格式要是 X.Y.Z，收到的是 $MANUAL"
+              exit 1
+            fi
+            new="$MANUAL"
+            echo "手動指定版本：$new"
+          elif [ -z "$last_tag" ]; then
+            new="$BASE_VERSION"
+            echo "首次發布：$new"
+          else
+            current="${last_tag#v}"
+            IFS=. read -r major minor patch <<<"$current"
+            subjects=$(git log --format=%s "$last_tag..HEAD")
+            feats=$(printf '%s\n' "$subjects" \
+              | grep -cE '^feat(\([^)]*\))?!?:' || true)
+            fixes=$(printf '%s\n' "$subjects" \
+              | grep -cE '^fix(\([^)]*\))?!?:' || true)
+            breaking=$(git log --format='%s%n%b' "$last_tag..HEAD" \
+              | grep -cE '^(feat|fix)(\([^)]*\))?!:|^BREAKING CHANGE' || true)
+
+            echo "自上次發布以來：feat $feats 個、fix $fixes 個"
+
+            if [ "$breaking" -gt 0 ]; then
+              echo "::notice::偵測到破壞性變更，主版號只能手動發布" \
+                "（Actions → Release → Run workflow 並填版本號）"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "$((feats + fixes))" -eq 0 ]; then
+              echo "::notice::沒有 feat 或 fix，不發布新版本"
+              echo "release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            new="$major.$((minor + feats)).$((patch + fixes))"
+            echo "自動計算版本：$current → $new"
+          fi
+
+          {
+            echo "release=true"
+            echo "version=$new"
+            echo "tag=v$new"
+            echo "previous=$last_tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Install uv
+        if: steps.version.outputs.release == 'true'
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # 發布前一定要綠燈，避免把壞掉的版本推出去。
+      - name: Install dependencies
+        if: steps.version.outputs.release == 'true'
+        run: uv sync --all-groups
+
+      - name: Lint
+        if: steps.version.outputs.release == 'true'
+        run: uv run ruff check .
+
+      - name: Test
+        if: steps.version.outputs.release == 'true'
+        run: uv run pytest
+
+      - name: 寫入版本號並打 tag
+        if: steps.version.outputs.release == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          sed -i -E "0,/^version = \".*\"/s//version = \"$VERSION\"/" \
+            pyproject.toml
+          grep -n '^version' pyproject.toml
+
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
+          git add pyproject.toml
+          # [skip ci] 只是省一次 CI；就算再跑一輪，這個 commit 不是 feat/
+          # fix，版本計算會直接判定不用發布。
+          git commit -m "chore(release): $TAG [skip ci]"
+          git tag -a "$TAG" -m "$TAG"
+          git push origin HEAD:main
+          git push origin "$TAG"
+
+      - name: 產生發布用的 ntust.ps1
+        if: steps.version.outputs.release == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          # 讓單獨下載的腳本認得自己屬於哪一版，才跑得到對應的原始碼。
+          sed -i -E "s|^\\\$Version = '.*'|\\\$Version = '$TAG'|" ntust.ps1
+          grep -n "Version = " ntust.ps1
+
+      - name: 整理更新內容
+        if: steps.version.outputs.release == 'true'
+        id: notes
+        env:
+          PREVIOUS: ${{ steps.version.outputs.previous }}
+        run: |
+          set -euo pipefail
+          range="${PREVIOUS:+$PREVIOUS..HEAD}"
+          {
+            echo "## 新功能"
+            git log --format='- %s' ${range:+"$range"} \
+              | grep -E '^- feat' || echo "- （無）"
+            echo
+            echo "## 修正"
+            git log --format='- %s' ${range:+"$range"} \
+              | grep -E '^- fix' || echo "- （無）"
+            echo
+            echo "## 怎麼用"
+            echo '下載下面的 `ntust.ps1`，不用編譯也不用先 clone：'
+            echo
+            echo '```powershell'
+            echo '.\ntust.ps1 課號:TCG175302              # 監看人數'
+            echo '.\ntust.ps1 -Mode alert 課號:TCG175302  # 搶課提醒'
+            echo '.\ntust.ps1 -AutoEnroll 課號:TCG175302  # 一併自動加選'
+            echo '```'
+            echo
+            echo '自動加選預設關閉，要開請加 `-AutoEnroll`。'
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+      - name: 建立 Release
+        if: steps.version.outputs.release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" ntust.ps1 \
+            --title "$TAG" \
+            --notes-file RELEASE_NOTES.md
