@@ -252,6 +252,8 @@ class Stage:
         list_marker: 清單頁面一定看得到的字串，用來確認拿到的真的是清單。
         parse_enrolled: 取出「已經選上」的課碼，送出加選前用它擋重送。
         parse_submitted: 取出「已選上或已送出」的課碼，送出後用它確認。
+        guard_covers_submitted: 送出前的擋重送清單是否已經涵蓋「已送出」。
+            False 代表呼叫端要自己再確認一次才安全（見電選課的志願序）。
     """
 
     name: str
@@ -261,6 +263,7 @@ class Stage:
     list_marker: str
     parse_enrolled: collections.abc.Callable[[str], set[str]]
     parse_submitted: collections.abc.Callable[[str], set[str]]
+    guard_covers_submitted: bool
 
 
 DEPT_STAGE = Stage(
@@ -271,6 +274,8 @@ DEPT_STAGE = Stage(
     list_marker='class="table-cell"',
     parse_enrolled=parse_dept_enrolled,
     parse_submitted=parse_dept_submitted,
+    # 擋重送只看「已選上」，不看志願序，所以會放行已經排進志願序的課。
+    guard_covers_submitted=False,
 )
 
 
@@ -283,6 +288,7 @@ OPEN_STAGE = Stage(
     parse_enrolled=parse_open_enrolled,
     # 加退選只有一份選課清單，在裡面就是選上了，沒有志願序這回事。
     parse_submitted=parse_open_enrolled,
+    guard_covers_submitted=True,
 )
 
 
@@ -332,12 +338,31 @@ def stage_for(period: str | None = None) -> Stage | None:
     """取得時段對應的選課階段。
 
     Args:
-        period: periods.get_current_period() 的回傳值，None 代表看今天。
+        period: 時段代碼——要送出加選就傳 periods.get_current_period()（收
+            不收加選），只是要維持 session 則傳 get_scheduled_period()（日
+            期落在哪一段）；None 代表看現在收不收加選。
 
     Returns:
         對應的 Stage；非選課時段時回傳 None。
     """
     return STAGES.get(period or periods.get_current_period())
+
+
+def guard_covers_submitted(period: str | None = None) -> bool:
+    """這個階段的擋重送清單夠不夠用。
+
+    夠用的話呼叫端就不必在送出前自己多讀一次清單——同一頁重複讀兩遍只是
+    白白多打學校系統一次。
+
+    Args:
+        period: 時段代碼，None 代表看現在收不收加選。
+
+    Returns:
+        擋重送清單已涵蓋「已送出」為 True；非選課時段時回傳 True（反正
+        送不出去）。
+    """
+    stage = stage_for(period)
+    return stage is None or stage.guard_covers_submitted
 
 
 class CookieStore:
@@ -443,7 +468,9 @@ class CourseSelector:
         Returns:
             session 仍有效（或重新登入成功）為 True。
         """
-        stage = stage_for()
+        # 維持 session 跟收不收加選是兩回事：選課期間的半夜也要一直碰選課
+        # 頁，早上九點開放的那一刻才不會發現自己已經被登出。
+        stage = stage_for(periods.get_scheduled_period())
         url = stage.page_url if stage else COURSE_SELECTION_ROOT
         with self._lock:
             try:
@@ -546,6 +573,40 @@ class CourseSelector:
                 logger.error("加選 %s 發生錯誤: %s", course_no, e)
                 return False, str(e)
 
+    def submitted_courses(self, period: str | None = None) -> set[str] | None:
+        """讀出目前「已選上或已送出」的課碼。
+
+        「清單裡沒有」跟「讀不到清單」必須分得開：讀不到還照送的話，電選
+        課階段已經排進志願序的課會被再一次 ExtraJoin 取消。
+
+        Args:
+            period: 指定時段，None 代表看現在收不收加選。
+
+        Returns:
+            課碼集合（電選課含志願序）；非選課時段或讀不到清單時回傳
+            None。
+        """
+        stage = stage_for(period)
+        if stage is None:
+            return None
+
+        with self._lock:
+            if not self._login():
+                return None
+            try:
+                resp = self._get_signed_in(stage.list_url)
+                if resp is None:
+                    logger.error("[%s] 取不到選課清單", stage.name)
+                    return None
+                submitted = read_submitted(stage, resp.text)
+                if submitted is None:
+                    logger.error("[%s] 拿到的不是選課清單頁面", stage.name)
+                    return None
+                return submitted
+            except Exception as e:
+                logger.error("讀取選課清單時發生錯誤: %s", e)
+                return None
+
     def verify_enrolled(
         self, course_no: str, period: str | None = None
     ) -> bool:
@@ -553,7 +614,7 @@ class CourseSelector:
 
         Args:
             course_no: 要確認的課程代碼。
-            period: 指定時段，None 代表看今天落在哪個時段。
+            period: 指定時段，None 代表看現在收不收加選。
 
         Returns:
             課程已在清單（電選課含志願序清單）中為 True。取不到清單時一律
@@ -561,30 +622,19 @@ class CourseSelector:
         """
         stage = stage_for(period)
         if stage is None:
+            logger.error("目前不是選課時段，無法確認 %s", course_no)
             return False
 
-        with self._lock:
-            if not self._login():
-                return False
-            try:
-                resp = self._get_signed_in(stage.list_url)
-                if resp is None:
-                    logger.error("[%s] 取不到選課清單，無法確認 %s",
-                                 stage.name, course_no)
-                    return False
-                enrolled = read_submitted(stage, resp.text)
-                if enrolled is None:
-                    logger.error("[%s] 拿到的不是選課清單頁面，無法確認 %s",
-                                 stage.name, course_no)
-                    return False
-                found = course_no.upper() in enrolled
-                state = "已在清單中" if found else "未在清單中"
-                logger.info("[%s] 驗證加選結果: %s %s",
-                            stage.name, course_no, state)
-                return found
-            except Exception as e:
-                logger.error("驗證加選結果時發生錯誤: %s", e)
-                return False
+        submitted = self.submitted_courses(period)
+        if submitted is None:
+            logger.error("[%s] 讀不到選課清單，無法確認 %s",
+                         stage.name, course_no)
+            return False
+
+        found = course_no.upper() in submitted
+        logger.info("[%s] 驗證加選結果: %s %s", stage.name, course_no,
+                    "已在清單中" if found else "未在清單中")
+        return found
 
     def close(self):
         self._client.close()
