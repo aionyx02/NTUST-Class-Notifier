@@ -90,13 +90,25 @@ def test_data_dir_honours_env_var(
     assert target.is_dir()  # 不存在時要自己建立。
 
 
-def test_auto_enroll_defaults_to_on_when_credentials_exist(
+def test_auto_enroll_stays_off_until_it_is_asked_for(
     clean_env: pytest.MonkeyPatch,
 ) -> None:
     clean_env.setenv("STUDENT_ID", "B11215000")
     clean_env.setenv("PASSWORD", "pw")
 
-    # 沒寫 AUTO_ENROLL 就維持舊行為，不會突然不幫忙加選。
+    # .env 留著帳密（多半是為了別的用途）不該讓程式自己去登入搶課，
+    # 一定要明確打開開關。
+    assert config.auto_enroll_enabled() is False
+    assert config.Settings.from_env().selector_enabled is False
+
+
+def test_auto_enroll_true_plus_credentials_enables_it(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    clean_env.setenv("AUTO_ENROLL", "true")
+    clean_env.setenv("STUDENT_ID", "B11215000")
+    clean_env.setenv("PASSWORD", "pw")
+
     assert config.Settings.from_env().selector_enabled is True
 
 

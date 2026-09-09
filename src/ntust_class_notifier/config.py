@@ -14,7 +14,7 @@ import dotenv
 # 篩選規則的變數名；另接受 LOOK_UP_CLASSES_1、_2… 等編號變數。
 RULE_VAR = "LOOK_UP_CLASSES"
 
-# 自動加選的總開關，填 true/false。
+# 自動加選的總開關，填 true/false；沒設定時預設關閉。
 AUTO_ENROLL_VAR = "AUTO_ENROLL"
 
 # 開關接受的寫法，大小寫不拘。
@@ -79,8 +79,9 @@ def look_up_classes() -> str:
 def auto_enroll_enabled() -> bool:
     """讀取自動加選開關。
 
-    沒有設定時維持舊行為：只要填了帳密就啟用。想關掉就寫
-    `AUTO_ENROLL=false`，不必把帳密刪掉。
+    預設關閉：自動加選是會替使用者對學校系統送出請求的動作，光是 .env 裡
+    留著帳密（多半是為了別的用途）不該讓程式自己去登入搶課，一定要明確寫
+    `AUTO_ENROLL=true` 才啟用。
 
     Returns:
         是否啟用自動加選。
@@ -91,7 +92,7 @@ def auto_enroll_enabled() -> bool:
     load_env()
     raw = os.environ.get(AUTO_ENROLL_VAR, "").strip().lower()
     if not raw:
-        return True
+        return False
     if raw in _TRUE:
         return True
     if raw in _FALSE:
@@ -149,7 +150,7 @@ class Settings:
         discord_target_ids: 收件對象 ID，可為伺服器、頻道或使用者。
         student_id: 選課系統學號，空字串代表不啟用自動加選。
         password: 選課系統密碼。
-        auto_enroll: 自動加選的總開關。
+        auto_enroll: 自動加選的總開關，預設關閉。
     """
 
     look_up_classes: str = ""
@@ -157,7 +158,7 @@ class Settings:
     discord_target_ids: tuple[int, ...] = ()
     student_id: str = ""
     password: str = ""
-    auto_enroll: bool = True
+    auto_enroll: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -192,5 +193,5 @@ class Settings:
 
     @property
     def selector_enabled(self) -> bool:
-        """開關沒關掉、而且帳密都有填時才會登入選課系統。"""
+        """明確打開開關、而且帳密都有填時才會登入選課系統。"""
         return bool(self.auto_enroll and self.student_id and self.password)
