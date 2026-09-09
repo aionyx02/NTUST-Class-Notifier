@@ -29,9 +29,11 @@
 
 | 指令 | 用途 | 需要 Discord | 會登入選課系統 |
 | --- | --- | :---: | :---: |
-| `ntust-watch` | 每 5 秒盯人數，只在有變動時輸出一行（被選走紅色、有人退選綠色） | ✗ | ✗ |
-| `ntust-alert` | 課程一出現空位就大字提醒＋音效 | ✗ | ✗ |
+| `ntust-watch` | 每 5 秒盯人數，只在有變動時輸出一行（被選走紅色、有人退選綠色） | ✗ | 選填 |
+| `ntust-alert` | 課程一出現空位就大字提醒＋音效 | ✗ | 選填 |
 | `ntust-notify` | 把狀態發到 Discord，永遠只留一則自動更新的訊息 | ✓ | 選填 |
+
+三支都一樣：`.env` 填了 `STUDENT_ID` / `PASSWORD`、而且 `AUTO_ENROLL` 不是 `false` 時才會登入選課系統並自動加選；`--no-enroll` 可以單次停用。
 
 三個指令共用同一套 `欄位:值` 篩選規則，寫在 `.env` 或直接打在命令列都行。
 
@@ -47,6 +49,39 @@ git clone https://github.com/aionyx02/NTUST-Class-Notifier.git
 cd NTUST-Class-Notifier
 uv sync
 ```
+
+### 或者：下載 `ntust.ps1`（Windows，不用 clone）
+
+到 [Releases](https://github.com/aionyx02/NTUST-Class-Notifier/releases)
+下載 `ntust.ps1`，參數直接接在後面：
+
+```powershell
+.\ntust.ps1 課號:TCG175302              # 監看人數
+.\ntust.ps1 -Mode alert 課號:TCG175302  # 搶課提醒＋音效
+.\ntust.ps1 -AutoEnroll 課號:TCG175302  # 一併自動加選
+.\ntust.ps1 課號:CS -- -i 10 --list     # 「--」後面原樣傳給程式
+```
+
+腳本旁邊找得到 `pyproject.toml` 就跑本機原始碼，找不到就直接跑 GitHub 上
+對應版本的程式碼，兩種情況都不需要編譯。**自動加選預設關閉**，要開才加
+`-AutoEnroll`；想完全照 `.env` 的 `AUTO_ENROLL` 決定就加 `-UseEnvSwitch`。
+
+#### 帳密
+
+沒有 `.env` 也能用。第一次加 `-SaveCredential` 輸入一次，之後就不用再輸入：
+
+```powershell
+.\ntust.ps1 -AutoEnroll -StudentId B11415024 -SaveCredential 課號:TCG175302
+.\ntust.ps1 -AutoEnroll 課號:TCG175302   # 之後直接跑
+.\ntust.ps1 -ForgetCredential            # 刪掉存起來的帳密
+```
+
+取得順序是 `-StudentId`／提示輸入 → 加密檔 → `.env`；`.env` 已經備齊帳密時
+不會多問。**沒有 `-Password` 這個參數**：PowerShell 會把每一行指令原文寫進
+`ConsoleHost_history.txt` 永久保存，密碼一律用 `Read-Host -AsSecureString`
+輸入，並以環境變數交給子行程，不會出現在歷史紀錄或行程命令列裡。
+`-SaveCredential` 存的檔在 `%LOCALAPPDATA%\ntust-class-notifier\`，用 Windows
+DPAPI 加密——只有你這個 Windows 帳號、在這台機器上解得開。
 
 ## 快速開始
 
@@ -71,7 +106,8 @@ uv run ntust-notify
 | `LOOK_UP_CLASSES_1`, `_2`… | | 想一行寫一條規則時用，會與 `LOOK_UP_CLASSES` 合併 |
 | `DISCORD_BOT_TOKEN` | | Discord Bot Token；沒填就不啟動 Bot |
 | `DISCORD_TARGET_IDS` | | 收通知的 ID，多個以 `;` 分隔。伺服器 ID → 自動挑一個能發言的文字頻道、頻道 ID → 發到該頻道、使用者 ID → 發私訊。舊名稱 `DISCORD_TARGET_USER_IDS` 仍可用 |
-| `STUDENT_ID` / `PASSWORD` | | 選課系統帳密。兩個都填時 `ntust-notify` 會在電選課加選期間自動送出加選，**有風險，預設請留空** |
+| `STUDENT_ID` / `PASSWORD` | | 選課系統帳密。兩個都填時，三支指令都會在電選課加選與全校加退選期間自動送出加選，**有風險，預設請留空** |
+| `AUTO_ENROLL` | | 自動加選開關，填 `true` / `false`。沒設定時等同 `true`（有帳密就啟用）；填 `false` 可以留著帳密但不加選 |
 | `NTUST_DATA_DIR` | | cookie 等執行期檔案的存放目錄（預設 `~/.ntust-class-notifier`） |
 | `NO_COLOR` | | 設任何值就停用終端機色彩 |
 
@@ -79,6 +115,11 @@ uv run ntust-notify
 LOOK_UP_CLASSES=課號:CS 學制:大學部; 課號:PE139A053 系所:資訊工程系三
 DISCORD_BOT_TOKEN=r9mfsU...
 DISCORD_TARGET_IDS=810822763601461318;1278934756926423052
+
+# 自動加選：填了帳密後用這個開關控制，不想加選時改成 false 即可
+STUDENT_ID=B11215000
+PASSWORD=...
+AUTO_ENROLL=true
 ```
 
 ## 使用方式
@@ -230,6 +271,29 @@ LOOK_UP_CLASSES=課號:CS 學制:大學部; 課號:PE139A053 系所:資訊工程
 - **舊學期只列不監看** — 指定比目前舊的學期（例如 `-s 1142`）時，列出結果就結束，不會空轉輪詢。
 - **週期自動保護** — `-i` 是「每輪週期」且已扣掉查詢耗時；查詢比週期還久時自動改用「查詢耗時 × 2」。全校查詢約 4200 門、2 MB、伺服器要跑 70~80 秒，所以全校模式實際約 2~3 分鐘一輪。
 - **系所名額檢查** — 寫了 `系所:…` 時會查該課程的保留名額，擋掉「總數有空位但你的系已滿」的假空位；命中超過 50 門則跳過（那支 API 一門課要一次請求）。
+- **自動加選分兩個階段** — 電選課走 `First/A06/ExtraJoin`、全校加退選走 `AddAndSub/B01/ExtraJoin`，由目前時段決定；兩邊的已選清單格式不同，驗證方式也各自一套（加退選讀 `#cartTable`）。
+- **不會重複送出加選** — 實測時對「已在選課清單裡」的課再送一次 `ExtraJoin`，那門課就從清單消失了。所以送出前一定先確認課程不在清單中，已選上的一律略過；空位持續存在也只會送一次，補滿後再次釋出才會再搶。
+- **一輪最多加選 5 門** — 規則寫太廣（例如 `課號:CS`）時可能一次湧出幾十門空位，連續送出幾十次加選正是學校明文禁止的行為，超過就整批不送並提示你縮小規則。
+- **session 自己顧** — 登入後每 3 分鐘碰一次選課頁面；選課系統的登入過期時不會回錯誤碼，而是回一個登入頁，所以是看頁面上有沒有登出表單來判斷，失效就地重新登入。監看與維持 session 跑在同一個事件迴圈，等空位等上幾小時也不會醒來才發現已被登出。
+- **送出前一定確認 session** — 加選前的那一次清單查詢同時負責確認登入狀態；登不回去就直接回報失敗，不會在 session 已死的情況下送出一個什麼都沒做的請求。
+
+## 發布
+
+推到 `main` 後 `Release` workflow 會自己算版本、打 tag、發 Release，並附上
+`ntust.ps1`：
+
+| commit | 版本變化 |
+| --- | --- |
+| `feat: …` | 次版號 +0.1.0（每個 feat 都算一次） |
+| `fix: …` | 修訂號 +0.0.1（每個 fix 都算一次） |
+| 其他（`docs:`、`chore:`…） | 不發布 |
+
+例如 `0.1.0` 之後有 2 個 feat、3 個 fix，就會發成 `0.3.3`。次版號到 `0.9.0`
+再加一個 feat 是 `0.10.0`，**主版號永遠不會自動跳**。
+
+`1.0.0` 這種主版號只能由你自己發：Actions → Release → Run workflow，填入
+版本號。commit 帶了 `!` 或 `BREAKING CHANGE` 時 workflow 也會停下來，等你
+手動決定。
 
 ## 開發
 
