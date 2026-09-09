@@ -11,4 +11,11 @@
 `config` 是唯一讀取 .env 的地方，各層都可以用。
 """
 
-__version__ = "0.3.0"
+import importlib.metadata
+
+try:
+    # 版本號只有 pyproject.toml 一份，發布流程也只改那一份；手寫在這裡的
+    # 副本一定會跟它對不起來。
+    __version__ = importlib.metadata.version("ntust-class-notifier")
+except importlib.metadata.PackageNotFoundError:  # 沒安裝、直接跑原始碼
+    __version__ = "0+unknown"
