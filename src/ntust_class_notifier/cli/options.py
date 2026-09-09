@@ -52,7 +52,8 @@ def build_parser(
         help=f"啟動時列出全部課程（預設超過 {report.LIST_LIMIT} 門就省略）")
     parser.add_argument(
         "--no-enroll", action="store_true",
-        help="停用自動加選（預設在 .env 有填 STUDENT_ID/PASSWORD 時啟用）")
+        help="停用自動加選（自動加選預設關閉，要 .env 寫 AUTO_ENROLL=true "
+             "並填 STUDENT_ID/PASSWORD 才會啟用）")
     parser.add_argument("--no-color", action="store_true", help="停用色彩輸出")
     parser.add_argument(
         "-d", "--debug", action="store_true", help="顯示除錯訊息")
@@ -181,8 +182,8 @@ async def setup_enroller(
         printer: 輸出器，登入結果要讓使用者看到。
 
     Returns:
-        登入成功的自動加選器；開關關掉、沒帳密、加了 --no-enroll 或登入
-        失敗時為 None。
+        登入成功的自動加選器；開關沒打開、沒帳密、加了 --no-enroll、內建
+        的選課時程已經過期或登入失敗時為 None。
 
     Raises:
         config.ConfigError: AUTO_ENROLL 寫了無法辨識的值。
@@ -190,12 +191,17 @@ async def setup_enroller(
     if args.no_enroll:
         return None
     if not config.auto_enroll_enabled():
-        return None  # 自己關掉的功能不需要每次啟動都被提醒一次。
+        return None  # 沒打開的功能不需要每次啟動都被提醒一次。
 
     student_id, password = config.credentials()
     if not (student_id and password):
         printer.line(printer.color(
             "（未設定 STUDENT_ID/PASSWORD，不啟用自動加選）", console.DIM))
+        return None
+
+    if periods.schedule_expired():
+        printer.line(printer.color(
+            enroll_app.SCHEDULE_EXPIRED_NOTE, console.YELLOW))
         return None
 
     printer.line(printer.color(
@@ -206,10 +212,9 @@ async def setup_enroller(
             "選課系統登入失敗，自動加選停用。", console.RED))
         return None
 
-    period = periods.get_current_period()
+    open_now = periods.get_current_period() in periods.SELECTION_PERIODS
     printer.line(printer.color(
-        f"自動加選已啟用（目前時段：{periods.get_period_name(period)}）"
-        if period in periods.SELECTION_PERIODS else
-        f"自動加選已啟用，但目前是{periods.get_period_name(period)}，"
+        f"自動加選已啟用（目前時段：{periods.describe()}）" if open_now else
+        f"自動加選已啟用，但目前是{periods.describe()}，"
         "偵測到空位也不會送出。", console.GREEN))
     return enroll_app.AutoEnroller(selector=selector)

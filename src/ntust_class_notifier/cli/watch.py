@@ -1,8 +1,9 @@
 """ntust-watch：終端機課程人數監看。
 
 每隔數秒查詢一次課程人數，只在人數有變動時輸出一行（整行上色）：被別人
-選走是紅色、有人退選是綠色，沒有變動就不輸出。.env 有填 STUDENT_ID/PASSWORD
-時會登入選課系統，課程一出現空位就自動送出加選（--no-enroll 可停用）。
+選走是紅色、有人退選是綠色，沒有變動就不輸出。.env 寫了 AUTO_ENROLL=true
+又填了 STUDENT_ID/PASSWORD 時會登入選課系統，課程一出現空位就自動送出加選
+（--no-enroll 可單次停用）。
 
 用法：
     uv run ntust-watch 課號:CS 學制:大學部
@@ -22,23 +23,30 @@ from ntust_class_notifier.core import ruleset
 from ntust_class_notifier.ui import console
 
 
-async def _monitor(client, parsed, semester, args, printer) -> None:
-    """登入（如有需要）後開始監看，期間在背景維持 session。
+async def _run(args, printer) -> None:
+    """整支程式的非同步流程。
 
-    監看與 keepalive 必須跑在同一個事件迴圈裡，等空位等上幾小時登入狀態才
-    不會過期。
+    查詢客戶端共用一條連線，所以規則解析、監看與 keepalive 都得跑在同一個
+    事件迴圈裡；等空位等上幾小時，登入狀態才不會過期。
 
     Args:
-        client: 課程查詢客戶端。
-        parsed: 篩選規則。
-        semester: 預設學期。
         args: 已解析的命令列參數。
         printer: 輸出器。
+
+    Raises:
+        ruleset.RuleError: 規則寫錯。
+        config.ConfigError: .env 設定寫錯。
     """
-    enroller = await options.setup_enroller(args, printer)
-    async with enroll_app.session_kept_alive(enroller):
-        await watch_app.watch(client, parsed, semester, args.interval,
-                              printer, args.list, enroller)
+    async with course_api.CourseClient() as client:
+        parsed, semester, is_old = await options.prepare(client, args, printer)
+        if is_old:
+            await options.list_once(client, parsed, semester, printer)
+            return
+
+        enroller = await options.setup_enroller(args, printer)
+        async with enroll_app.session_kept_alive(enroller):
+            await watch_app.watch(client, parsed, semester, args.interval,
+                                  printer, args.list, enroller)
 
 
 def main() -> None:
@@ -53,19 +61,10 @@ def main() -> None:
     if args.interval < 1:
         parser.error("每輪週期請勿小於 1 秒，以免被選課系統限流 (429)。")
 
-    client = course_api.CourseClient()
     try:
-        parsed, semester, is_old = asyncio.run(
-            options.prepare(client, args, printer))
+        asyncio.run(_run(args, printer))
     except ruleset.RuleError as error:
         parser.exit(2, printer.color(f"規則錯誤：{error}\n", console.RED))
-
-    try:
-        if is_old:
-            asyncio.run(
-                options.list_once(client, parsed, semester, printer))
-            return
-        asyncio.run(_monitor(client, parsed, semester, args, printer))
     except config.ConfigError as error:
         parser.exit(2, printer.color(f"{error}\n", console.RED))
     except KeyboardInterrupt:

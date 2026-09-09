@@ -17,6 +17,7 @@ from ntust_class_notifier.app import search
 from ntust_class_notifier.clients import course_api
 from ntust_class_notifier.clients import discord_bot
 from ntust_class_notifier.clients import enrollment
+from ntust_class_notifier.core import periods
 from ntust_class_notifier.core import ruleset
 from ntust_class_notifier.ui import board
 from ntust_class_notifier.ui import console
@@ -48,7 +49,12 @@ async def login_selector(
         登入成功的客戶端；沒設定帳密或登入失敗時回傳 None。
     """
     if not settings.selector_enabled:
-        logger.info("未設定 STUDENT_ID/PASSWORD，不啟用自動加選")
+        logger.info("未設定 AUTO_ENROLL=true 或 STUDENT_ID/PASSWORD，"
+                    "不啟用自動加選")
+        return None
+
+    if periods.schedule_expired():
+        logger.warning("%s", enroll_app.SCHEDULE_EXPIRED_NOTE)
         return None
 
     selector = await enroll_app.login_selector(
@@ -57,7 +63,8 @@ async def login_selector(
         logger.warning("選課系統登入失敗，自動加選功能停用")
         return None
 
-    logger.info("選課系統自動加選功能已啟用")
+    logger.info("選課系統自動加選功能已啟用（目前時段：%s）",
+                periods.describe())
     return selector
 
 
@@ -102,31 +109,33 @@ async def main(settings: config.Settings) -> None:
         logger.error("LOOK_UP_CLASSES 規則錯誤：%s", error)
         sys.exit(1)
 
-    client = course_api.CourseClient()
-    explicit = (
-        parsed[0].semester
-        if parsed and all(rule.semester for rule in parsed)
-        else ""
-    )
-    semester, note = await search.resolve_semester(client, explicit)
-    if note:
-        logger.info(note)
+    async with course_api.CourseClient() as client:
+        explicit = (
+            parsed[0].semester
+            if parsed and all(rule.semester for rule in parsed)
+            else ""
+        )
+        semester, note = await search.resolve_semester(client, explicit)
+        if note:
+            logger.info(note)
 
-    selector = await login_selector(settings)
-    initial = await search.search(client, parsed, semester)
-    bot = create_bot(settings, board.startup_message(
-        parsed, initial.counts, initial.courses, semester, bool(selector)))
+        selector = await login_selector(settings)
+        initial = await search.search(client, parsed, semester)
+        bot = create_bot(settings, board.startup_message(
+            parsed, initial.counts, initial.courses, semester, bool(selector)))
 
-    tasks = [asyncio.create_task(
-        notify.monitor_courses(client, parsed, semester, bot, selector))]
-    if selector:
-        tasks.append(asyncio.create_task(
-            enroll_app.keep_session_alive(selector)))
-    if bot:
-        # 一起 gather 才會保留 task 參考，Bot 斷線或 token 錯誤也才看得到。
-        tasks.append(asyncio.create_task(bot.start(settings.discord_token)))
+        tasks = [asyncio.create_task(
+            notify.monitor_courses(client, parsed, semester, bot, selector))]
+        if selector:
+            tasks.append(asyncio.create_task(
+                enroll_app.keep_session_alive(selector)))
+        if bot:
+            # 一起 gather 才會保留 task 參考，Bot 斷線或 token 錯誤也才看
+            # 得到。
+            tasks.append(
+                asyncio.create_task(bot.start(settings.discord_token)))
 
-    await asyncio.gather(*tasks)
+        await asyncio.gather(*tasks)
 
 
 def run() -> None:
