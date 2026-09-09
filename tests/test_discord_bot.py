@@ -1,6 +1,9 @@
-"""clients.discord_bot：收件對象的自動判斷。"""
+"""clients.discord_bot：收件對象的自動判斷與狀態訊息的更新。"""
 
 import asyncio
+import pathlib
+import tempfile
+import types
 
 import discord
 import pytest
@@ -21,8 +24,45 @@ class _Perms:
         self.send_messages = allowed
 
 
+def _not_found() -> discord.NotFound:
+    """組一個 discord.NotFound，代表訊息已經被人刪掉了。
+
+    Returns:
+        可以直接 raise 的例外。
+    """
+    return discord.NotFound(
+        types.SimpleNamespace(status=404, reason="Not Found"), "unknown")
+
+
+class _FakeMessage:
+    """記錄自己被編輯成什麼的假訊息。
+
+    Attributes:
+        channel: 訊息所在的頻道。
+        id: 訊息 ID。
+        content: 目前的內容。
+        gone: 是否已經被人刪掉（編輯時會丟 NotFound）。
+    """
+
+    def __init__(self, channel: "_FakeChannel", message_id: int,
+                 content: str, gone: bool = False):
+        self.channel = channel
+        self.id = message_id
+        self.content = content
+        self.gone = gone
+
+    async def edit(self, content: str | None = None) -> None:
+        if self.gone:
+            raise _not_found()
+        self.content = content or ""
+
+
 class _FakeChannel(discord.abc.Messageable):
-    """能被 isinstance(..., Messageable) 認出的假頻道。"""
+    """能被 isinstance(..., Messageable) 認出的假頻道。
+
+    Attributes:
+        sent: 這個頻道裡目前留下的訊息。
+    """
 
     def __init__(self, name: str, channel_id: int, position: int,
                  allowed: bool = True):
@@ -30,12 +70,27 @@ class _FakeChannel(discord.abc.Messageable):
         self.id = channel_id
         self.position = position
         self._allowed = allowed
+        self.sent: list[_FakeMessage] = []
+        self._next_id = 100
 
     async def _get_channel(self) -> "_FakeChannel":
         return self
 
     def permissions_for(self, member: object) -> _Perms:
         return _Perms(self._allowed)
+
+    async def send(self, content: str) -> _FakeMessage:
+        self._next_id += 1
+        message = _FakeMessage(self, self._next_id, content)
+        self.sent.append(message)
+        return message
+
+    def get_partial_message(self, message_id: int) -> _FakeMessage:
+        for message in self.sent:
+            if message.id == message_id:
+                return message
+        # 訊息不在這個頻道裡（例如被人刪了），編輯時才會知道。
+        return _FakeMessage(self, message_id, "", gone=True)
 
 
 class _FakeGuild:
@@ -54,15 +109,20 @@ class _FakeUser:
 
 
 def _make_bot(guild: _FakeGuild | None,
-              channel: _FakeChannel) -> discord_bot.DiscordBot:
+              channel: _FakeChannel,
+              target_ids: list[int] | None = None,
+              store: discord_bot.MessageStore | None = None,
+              ) -> discord_bot.DiscordBot:
     """建一個所有查詢都走假資料的 Bot。
 
     Args:
         guild: get_guild 要回傳的伺服器，None 代表查不到。
         channel: get_channel 要回傳的頻道。
+        target_ids: 收件對象，預設沒有（只測 resolve_target）。
+        store: 訊息 ID 存檔，None 代表用暫存的空存檔。
 
     Returns:
-        可直接呼叫 resolve_target 的 Bot。
+        可直接呼叫 resolve_target 或 send_dm 的 Bot。
     """
 
     class _Bot(discord_bot.DiscordBot):
@@ -87,11 +147,17 @@ def _make_bot(guild: _FakeGuild | None,
                 return _FakeUser(user_id)
             raise discord.DiscordException("unknown user")
 
-    return _Bot(
+    bot = _Bot(
         intents=discord.Intents.default(),
-        target_ids=[],
+        target_ids=target_ids or [],
         startup_message="",
+        # 沒指定就給一個誰也不會撞到的空目錄，免得測試之間互相干擾、或把
+        # JSON 寫進專案目錄。
+        store=store or discord_bot.MessageStore(
+            pathlib.Path(tempfile.mkdtemp()) / "messages.json"),
     )
+    bot.ready_event.set()  # 測試不連線，直接當成已登入。
+    return bot
 
 
 @pytest.fixture
@@ -163,3 +229,82 @@ def test_resolved_target_is_cached(open_channel: _FakeChannel) -> None:
     asyncio.run(bot.resolve_target(CHANNEL_ID))
 
     assert bot.targets == {CHANNEL_ID: open_channel}
+
+
+def _store(tmp_path: pathlib.Path) -> discord_bot.MessageStore:
+    """建一個寫在暫存目錄的訊息 ID 存檔。
+
+    Args:
+        tmp_path: pytest 的暫存目錄。
+
+    Returns:
+        空的存檔。
+    """
+    return discord_bot.MessageStore(tmp_path / "discord_messages.json")
+
+
+def test_status_updates_edit_the_same_message(
+    open_channel: _FakeChannel, tmp_path: pathlib.Path
+) -> None:
+    bot = _make_bot(None, open_channel, [CHANNEL_ID], _store(tmp_path))
+
+    asyncio.run(bot.send_dm("第一版", key="狀態"))
+    asyncio.run(bot.send_dm("第二版", key="狀態"))
+
+    # 先刪再送只要新的那則送失敗，頻道就完全沒有狀態了，所以改成直接編輯。
+    assert len(open_channel.sent) == 1
+    assert open_channel.sent[0].content == "第二版"
+
+
+def test_a_message_without_a_key_is_always_a_new_one(
+    open_channel: _FakeChannel, tmp_path: pathlib.Path
+) -> None:
+    bot = _make_bot(None, open_channel, [CHANNEL_ID], _store(tmp_path))
+
+    asyncio.run(bot.send_dm("一次性通知"))
+    asyncio.run(bot.send_dm("另一則"))
+
+    assert [message.content for message in open_channel.sent] == [
+        "一次性通知", "另一則"]
+
+
+def test_a_deleted_message_falls_back_to_sending_a_new_one(
+    open_channel: _FakeChannel, tmp_path: pathlib.Path
+) -> None:
+    bot = _make_bot(None, open_channel, [CHANNEL_ID], _store(tmp_path))
+    asyncio.run(bot.send_dm("第一版", key="狀態"))
+    open_channel.sent[0].gone = True  # 使用者自己把它刪了。
+
+    asyncio.run(bot.send_dm("第二版", key="狀態"))
+
+    assert [message.content for message in open_channel.sent] == [
+        "第一版", "第二版"]
+
+
+def test_the_message_id_survives_a_restart(
+    open_channel: _FakeChannel, tmp_path: pathlib.Path
+) -> None:
+    path = tmp_path / "discord_messages.json"
+    first = _make_bot(None, open_channel, [CHANNEL_ID],
+                      discord_bot.MessageStore(path))
+    asyncio.run(first.send_dm("開機了", key="狀態"))
+
+    # 換一個 Bot，等於程式重開一次；ID 只留在記憶體的話這裡就會多一則。
+    second = _make_bot(None, open_channel, [CHANNEL_ID],
+                       discord_bot.MessageStore(path))
+    asyncio.run(second.send_dm("又開機了", key="狀態"))
+
+    assert len(open_channel.sent) == 1
+    assert open_channel.sent[0].content == "又開機了"
+
+
+def test_a_broken_store_file_just_means_a_new_message(
+    tmp_path: pathlib.Path,
+) -> None:
+    path = tmp_path / "discord_messages.json"
+    path.write_text("{ 這不是 JSON", encoding="utf-8")
+
+    store = discord_bot.MessageStore(path)
+
+    # 存檔壞掉大不了重送一則，不該讓通知功能整個起不來。
+    assert store.get("狀態", CHANNEL_ID) is None

@@ -1,16 +1,117 @@
 """Discord Bot 的連線與訊息傳送。
 
 收件對象只要填 ID 就好，程式會自動判斷那是伺服器、文字頻道還是使用者：
-填伺服器就自動挑一個機器人發得了言的文字頻道、填使用者就走私訊。同一個
-key 的訊息會先刪舊的再送新的，所以聊天室裡不會愈積愈多。
+填伺服器就自動挑一個機器人發得了言的文字頻道、填使用者就走私訊。
+
+同一個 key 的狀態訊息永遠只有一則：更新時直接 edit 原本那一則，不是「先
+刪再送」——先刪再送只要新的那則送失敗，頻道裡就完全沒有狀態了。訊息 ID
+會寫進 config.data_dir()，程式重開之後還是編輯同一則，不會每次重跑就在頻
+道裡多留一則孤兒訊息。
 """
 
 import asyncio
+import json
 import logging
+import pathlib
 
 import discord
 
+from ntust_class_notifier import config
+
 logger = logging.getLogger(__name__)
+
+# 訊息 ID 的存檔名稱，放在 config.data_dir() 底下。
+STORE_FILENAME = "discord_messages.json"
+
+
+class MessageStore:
+    """記住每個 key 在各個對象送出的訊息，讓重啟後還編輯得回去。
+
+    只存 ID，不存內容。存檔壞掉或讀不到時一律當成「沒有紀錄」，大不了重
+    送一則新訊息，不該讓通知功能整個起不來。
+
+    Attributes:
+        path: 存檔位置。
+    """
+
+    def __init__(self, path: pathlib.Path | None = None):
+        """開啟（或建立）訊息 ID 存檔。
+
+        Args:
+            path: 存檔位置，None 代表用 config.data_dir() 下的預設檔。
+        """
+        self.path = path or config.data_dir() / STORE_FILENAME
+        self._data: dict[str, dict[str, list[int]]] = self._read()
+
+    def _read(self) -> dict[str, dict[str, list[int]]]:
+        """讀取存檔。
+
+        Returns:
+            key -> {收件對象 ID: [頻道 ID, 訊息 ID]}；讀不到時為空 dict。
+        """
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as error:
+            logger.warning("讀不到訊息紀錄 %s（%s），這次重新送出訊息。",
+                           self.path, error)
+            return {}
+        return raw if isinstance(raw, dict) else {}
+
+    def _write(self) -> None:
+        """把目前的紀錄寫回存檔。"""
+        try:
+            self.path.write_text(
+                json.dumps(self._data, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            logger.warning("寫不進訊息紀錄 %s（%s），下次重開會重送一則新"
+                           "訊息。", self.path, error)
+
+    def get(self, key: str, target_id: int) -> tuple[int, int] | None:
+        """取出之前送出的訊息位置。
+
+        Args:
+            key: 訊息識別字。
+            target_id: 收件對象 ID。
+
+        Returns:
+            (頻道 ID, 訊息 ID)；沒有紀錄時回傳 None。
+        """
+        entry = self._data.get(key, {}).get(str(target_id))
+        if not isinstance(entry, list) or len(entry) != 2:
+            return None
+        try:
+            return int(entry[0]), int(entry[1])
+        except (TypeError, ValueError):
+            return None
+
+    def remember(
+        self, key: str, target_id: int, channel_id: int, message_id: int
+    ) -> None:
+        """記住某個 key 在某個對象送出的訊息。
+
+        Args:
+            key: 訊息識別字。
+            target_id: 收件對象 ID。
+            channel_id: 訊息所在的頻道 ID。
+            message_id: 訊息 ID。
+        """
+        self._data.setdefault(key, {})[str(target_id)] = [
+            channel_id, message_id]
+        self._write()
+
+    def forget(self, key: str, target_id: int) -> None:
+        """忘掉某個 key 在某個對象的紀錄。
+
+        Args:
+            key: 訊息識別字。
+            target_id: 收件對象 ID。
+        """
+        if self._data.get(key, {}).pop(str(target_id), None) is not None:
+            self._write()
 
 
 class DiscordBot(discord.Client):
@@ -19,9 +120,10 @@ class DiscordBot(discord.Client):
     Attributes:
         target_ids: 收件對象的 ID，可為伺服器、文字頻道或使用者。
         startup_message: 登入完成後要送出的第一則訊息。
-        message_key: 啟動訊息使用的 key，之後的更新用同一個 key 取代它。
+        message_key: 啟動訊息使用的 key，之後的更新會編輯同一則訊息。
         ready_event: on_ready 完成後才允許送訊息。
-        sent_messages: key 對應到上一次送出的訊息，重送前會先刪掉。
+        store: 訊息 ID 的存檔，重啟後靠它找回要編輯的訊息。
+        sent_messages: (key, 收件對象) 對應到這次執行送出的訊息。
         targets: 已解析過的收件對象快取。
     """
 
@@ -32,6 +134,7 @@ class DiscordBot(discord.Client):
         target_ids: list[int],
         startup_message: str,
         message_key: str = "狀態",
+        store: MessageStore | None = None,
     ):
         """初始化 Bot。
 
@@ -40,13 +143,15 @@ class DiscordBot(discord.Client):
             target_ids: 收件對象的 ID 列表，伺服器、頻道或使用者都可以。
             startup_message: 登入完成後送出的訊息。
             message_key: 所有狀態更新共用的 key。
+            store: 訊息 ID 存檔，None 代表用預設位置。
         """
         super().__init__(intents=intents)
         self.target_ids = tuple(target_ids)
         self.startup_message = startup_message
         self.message_key = message_key
         self.ready_event = asyncio.Event()
-        self.sent_messages: dict[str, list[discord.Message]] = {}
+        self.store = store if store is not None else MessageStore()
+        self.sent_messages: dict[tuple[str, int], discord.abc.Snowflake] = {}
         self.targets: dict[int, discord.abc.Messageable] = {}
 
     async def on_ready(self) -> None:
@@ -58,32 +163,142 @@ class DiscordBot(discord.Client):
     async def send_dm(self, message: str, key: str | None = None) -> None:
         """送訊息給所有收件對象。
 
-        給了 key 時會先刪掉上一次同一個 key 的訊息再送新的，所以聊天室裡
-        永遠只留最新的那一則。
+        給了 key 時會直接編輯上一次同一個 key 的訊息（含上一次執行留下
+        的），所以聊天室裡永遠只留那一則，而且更新失敗也不會讓頻道空著。
 
         Args:
             message: 要送出的內容。
-            key: 用來取代舊訊息的識別字，None 代表這則不參與取代。
+            key: 用來更新舊訊息的識別字，None 代表這則單純送出。
         """
         await self.ready_event.wait()
 
-        if key:
-            await self.delete_sent(key)
-
-        sent: list[discord.Message] = []
         for target_id in self.target_ids:
             target = await self.resolve_target(target_id)
             if target is None:
                 continue
-            try:
-                sent.append(await target.send(message))
-                logger.debug("已向 %s 發送訊息", target_id)
-            except discord.DiscordException as error:
-                logger.error("傳送 Discord 訊息發生錯誤（%s）：%s",
-                             target_id, error)
+            await self._deliver(target, target_id, message, key)
 
-        if key and sent:
-            self.sent_messages[key] = sent
+    async def _deliver(
+        self,
+        target: discord.abc.Messageable,
+        target_id: int,
+        message: str,
+        key: str | None,
+    ) -> None:
+        """把訊息送到單一收件對象：能編輯就編輯，否則送一則新的。
+
+        Args:
+            target: 收件對象。
+            target_id: 收件對象 ID。
+            message: 要送出的內容。
+            key: 訊息識別字，None 代表不參與更新。
+        """
+        if key and await self._edit_existing(target, target_id, message, key):
+            return
+
+        try:
+            sent = await target.send(message)
+        except discord.DiscordException as error:
+            logger.error("傳送 Discord 訊息發生錯誤（%s）：%s",
+                         target_id, error)
+            return
+
+        logger.debug("已向 %s 發送訊息", target_id)
+        if key:
+            self.sent_messages[(key, target_id)] = sent
+            self.store.remember(key, target_id, sent.channel.id, sent.id)
+
+    async def _edit_existing(
+        self,
+        target: discord.abc.Messageable,
+        target_id: int,
+        message: str,
+        key: str,
+    ) -> bool:
+        """試著把舊訊息改成新內容。
+
+        Args:
+            target: 收件對象。
+            target_id: 收件對象 ID。
+            message: 新的內容。
+            key: 訊息識別字。
+
+        Returns:
+            是否成功更新；False 代表呼叫端應該改送一則新訊息。
+        """
+        existing = self.sent_messages.get((key, target_id))
+        if existing is None:
+            existing = await self._restore(target, target_id, key)
+            if existing is None:
+                return False
+            # 記下來，否則每一輪更新都要再還原一次（私訊還會每輪多開一次
+            # DM 頻道），白白多打 Discord API。
+            self.sent_messages[(key, target_id)] = existing
+
+        try:
+            await existing.edit(content=message)
+            return True
+        except discord.NotFound:
+            logger.debug("%s 在 %s 的舊訊息已不存在，改送新的",
+                         key, target_id)
+        except discord.DiscordException as error:
+            logger.warning("更新 %s 在 %s 的訊息失敗（%s），改送新的",
+                           key, target_id, error)
+
+        self.sent_messages.pop((key, target_id), None)
+        self.store.forget(key, target_id)
+        return False
+
+    async def _restore(
+        self, target: discord.abc.Messageable, target_id: int, key: str
+    ) -> discord.PartialMessage | None:
+        """把存檔裡的訊息 ID 還原成可以編輯的訊息。
+
+        Args:
+            target: 收件對象。
+            target_id: 收件對象 ID。
+            key: 訊息識別字。
+
+        Returns:
+            可以呼叫 edit() 的訊息；沒有紀錄或頻道找不到時回傳 None。
+        """
+        stored = self.store.get(key, target_id)
+        if stored is None:
+            return None
+
+        channel_id, message_id = stored
+        channel = await self._channel_for(target, channel_id)
+        partial = getattr(channel, "get_partial_message", None)
+        if partial is None:
+            self.store.forget(key, target_id)
+            return None
+
+        logger.debug("沿用上一次執行留下的 %s 訊息 %s", key, message_id)
+        return partial(message_id)
+
+    async def _channel_for(
+        self, target: discord.abc.Messageable, channel_id: int
+    ) -> discord.abc.Messageable | discord.abc.GuildChannel | None:
+        """找出當初送出訊息的頻道。
+
+        Args:
+            target: 收件對象。
+            channel_id: 存檔裡記下的頻道 ID。
+
+        Returns:
+            對應的頻道；找不到時回傳 None。私訊的頻道 ID 抓不回來，所以
+            改用收件對象自己的 DM 頻道。
+        """
+        create_dm = getattr(target, "create_dm", None)
+        if create_dm is not None:
+            return (getattr(target, "dm_channel", None)
+                    or await self._fetch_or_none(create_dm))
+        if getattr(target, "id", None) == channel_id:
+            return target
+        channel = self.get_channel(channel_id)
+        if channel is None:
+            channel = await self._fetch_or_none(self.fetch_channel, channel_id)
+        return channel
 
     async def resolve_target(
         self, target_id: int
@@ -135,21 +350,6 @@ class DiscordBot(discord.Client):
             target_id,
         )
         return None
-
-    async def delete_sent(self, key: str) -> None:
-        """刪掉某個 key 之前送出的訊息。
-
-        Args:
-            key: 要清掉的識別字；使用者自己刪過就當作已完成。
-        """
-        for message in self.sent_messages.pop(key, []):
-            try:
-                await message.delete()
-                logger.debug("已刪除 %s 的舊訊息 %s", key, message.id)
-            except discord.NotFound:
-                logger.debug("%s 的舊訊息已不存在，略過刪除", key)
-            except discord.DiscordException as error:
-                logger.warning("刪除 %s 的舊訊息失敗：%s", key, error)
 
     def _remember(
         self, target_id: int, target: discord.abc.Messageable, kind: str
