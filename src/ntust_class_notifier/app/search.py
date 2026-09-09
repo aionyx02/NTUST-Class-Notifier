@@ -194,3 +194,44 @@ def _rule_payloads(
                         setattr(payload, level, 1)
                     payloads.append(payload)
     return payloads
+
+
+async def collect_vacant(
+    client: course_api.CourseClient,
+    result: "SearchResult",
+    semester: str,
+) -> list[tuple[models.Course, str]]:
+    """挑出這一輪真的可以選的課程。
+
+    Args:
+        client: 課程查詢客戶端。
+        result: 這一輪的查詢結果。
+        semester: 這次查詢的學期。
+
+    Returns:
+        (課程, 系所名額說明) 的列表；系所已額滿的假空位不會列入。
+    """
+    # 系所名額一門課要一次請求，命中太多門就整輪跳過這項檢查。
+    dept_allowed = len(result.matches) <= ruleset.DEPT_LOOKUP_LIMIT
+    vacant: list[tuple[models.Course, str]] = []
+
+    for match in result.matches:
+        course = match.course
+        if course.member_limit <= 0 or course.cur_member >= course.member_limit:
+            continue
+
+        dept_info = ""
+        if match.dept and dept_allowed:
+            limit = await client.get_department_limit(
+                semester, course.course_no, match.dept)
+            if limit is not None:
+                persons, restrict = limit
+                if persons >= restrict:
+                    logger.debug("總數有空位但系所額滿: %s (%s %d/%d)",
+                                 course.course_no, match.dept,
+                                 persons, restrict)
+                    continue
+                dept_info = f"{persons} / {restrict}（{match.dept}）"
+
+        vacant.append((course, dept_info))
+    return vacant

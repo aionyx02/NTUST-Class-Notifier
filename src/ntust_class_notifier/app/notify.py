@@ -8,6 +8,7 @@ import asyncio
 import logging
 import time
 
+from ntust_class_notifier.app import enroll as enroll_app
 from ntust_class_notifier.app import monitor
 from ntust_class_notifier.app import search
 from ntust_class_notifier.clients import course_api
@@ -16,7 +17,6 @@ from ntust_class_notifier.clients import enrollment
 from ntust_class_notifier.clients import sound
 from ntust_class_notifier.core import changes
 from ntust_class_notifier.core import models
-from ntust_class_notifier.core import periods
 from ntust_class_notifier.core import ruleset
 from ntust_class_notifier.ui import board
 
@@ -52,6 +52,7 @@ async def monitor_courses(
     """
     previous: dict[str, models.Course] = {}
     previous_vacant: set[str] = set()
+    enroller = enroll_app.AutoEnroller(selector) if selector else None
     # 從現在起算心跳，啟動訊息才不會馬上被看板取代。
     last_board = time.monotonic()
     rounds = 0
@@ -72,7 +73,8 @@ async def monitor_courses(
                 match.course.course_no: match.course
                 for match in result.matches
             }
-            vacant = await collect_vacant(client, result, semester)
+            vacant = await search.collect_vacant(
+                client, result, semester)
             current_vacant = {course.course_no for course, _ in vacant}
 
             round_changes = (
@@ -87,10 +89,9 @@ async def monitor_courses(
                 sound.play_sound("vacancy")
                 logger.info("偵測到空位：%s", "、".join(new_ones))
 
-            notes = []
-            if selector and periods.get_current_period() == "dept":
-                for course_no in new_ones:
-                    notes.append(await enroll(selector, course_no))
+            # 交給 AutoEnroller，時段判斷與一輪的加選上限才會跟另外兩支
+            # 指令完全一致。
+            notes = await enroller.on_round(current_vacant) if enroller else []
 
             stale = time.monotonic() - last_board >= HEARTBEAT_SECONDS
             if bot and (round_changes or notes or stale
@@ -112,89 +113,3 @@ async def monitor_courses(
         except Exception as error:  # noqa: BLE001 - 監控不該因單次錯誤中斷
             logger.error("監控課程時發生未知錯誤: %s", error, exc_info=True)
             await asyncio.sleep(60)
-
-
-async def collect_vacant(
-    client: course_api.CourseClient,
-    result: search.SearchResult,
-    semester: str,
-) -> list[tuple[models.Course, str]]:
-    """挑出這一輪真的可以選的課程。
-
-    Args:
-        client: 課程查詢客戶端。
-        result: 這一輪的查詢結果。
-        semester: 這次查詢的學期。
-
-    Returns:
-        (課程, 系所名額說明) 的列表；系所已額滿的假空位不會列入。
-    """
-    # 系所名額一門課要一次請求，命中太多門就整輪跳過這項檢查。
-    dept_allowed = len(result.matches) <= ruleset.DEPT_LOOKUP_LIMIT
-    vacant: list[tuple[models.Course, str]] = []
-
-    for match in result.matches:
-        course = match.course
-        if course.member_limit <= 0 or course.cur_member >= course.member_limit:
-            continue
-
-        dept_info = ""
-        if match.dept and dept_allowed:
-            limit = await client.get_department_limit(
-                semester, course.course_no, match.dept)
-            if limit is not None:
-                persons, restrict = limit
-                if persons >= restrict:
-                    logger.debug("總數有空位但系所額滿: %s (%s %d/%d)",
-                                 course.course_no, match.dept,
-                                 persons, restrict)
-                    continue
-                dept_info = f"{persons} / {restrict}（{match.dept}）"
-
-        vacant.append((course, dept_info))
-    return vacant
-
-
-async def enroll(
-    selector: enrollment.CourseSelector, course_no: str
-) -> str:
-    """送出加選並驗證結果。
-
-    Args:
-        selector: 已登入的選課系統客戶端。
-        course_no: 要加選的課程代碼。
-
-    Returns:
-        一行給訊息用的結果說明。
-    """
-    success, body = await enrollment.run_sync(
-        selector.select_course, course_no)
-    if not success:
-        sound.play_sound("failure")
-        return f"{course_no} 自動加選失敗：{body[:100]}"
-
-    await asyncio.sleep(3)  # 等系統寫入後再確認課程是否真的在清單裡。
-    verified = await enrollment.run_sync(selector.verify_enrolled, course_no)
-    if verified:
-        sound.play_sound("success")
-        return f"{course_no} 加選成功，已確認出現在選課清單中"
-
-    sound.play_sound("failure")
-    return (
-        f"{course_no} 已送出加選但未在清單中確認（名額可能已被搶走）："
-        f"{body[:100]}"
-    )
-
-
-async def session_keepalive(selector: enrollment.CourseSelector) -> None:
-    """每 3 分鐘訪問選課頁面以維持登入狀態。
-
-    Args:
-        selector: 已登入的選課系統客戶端。
-    """
-    while True:
-        await asyncio.sleep(180)
-        try:
-            await enrollment.run_sync(selector.keepalive)
-        except Exception as error:  # noqa: BLE001 - keepalive 失敗不該中斷
-            logger.error("Session keepalive 錯誤: %s", error)

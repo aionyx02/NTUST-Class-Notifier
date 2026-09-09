@@ -178,7 +178,9 @@ def startup_message(
 
     parts = [code_block(lines)]
     if auto_enroll:
-        parts.append("自動加選已啟用（電選課加選期間偵測到空位將自動送出）")
+        parts.append(
+            "自動加選已啟用（電選課加選與全校加退選期間偵測到空位將自動送出）"
+        )
     parts.append(
         "人數一有變動就更新，這則訊息會被直接取代，聊天室永遠只有一則。"
     )

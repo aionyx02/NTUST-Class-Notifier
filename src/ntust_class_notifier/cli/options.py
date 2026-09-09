@@ -9,9 +9,11 @@ import os
 import sys
 
 from ntust_class_notifier import config
+from ntust_class_notifier.app import enroll as enroll_app
 from ntust_class_notifier.app import search
 from ntust_class_notifier.clients import course_api
 from ntust_class_notifier.core import models
+from ntust_class_notifier.core import periods
 from ntust_class_notifier.core import ruleset
 from ntust_class_notifier.ui import console
 from ntust_class_notifier.ui import report
@@ -48,6 +50,9 @@ def build_parser(
     parser.add_argument(
         "--list", action="store_true",
         help=f"啟動時列出全部課程（預設超過 {report.LIST_LIMIT} 門就省略）")
+    parser.add_argument(
+        "--no-enroll", action="store_true",
+        help="停用自動加選（預設在 .env 有填 STUDENT_ID/PASSWORD 時啟用）")
     parser.add_argument("--no-color", action="store_true", help="停用色彩輸出")
     parser.add_argument(
         "-d", "--debug", action="store_true", help="顯示除錯訊息")
@@ -164,3 +169,47 @@ async def list_once(
     report.print_courses(printer, result.courses)
     printer.line(printer.color(
         f"── 共 {len(result.courses)} 門 ──", console.CYAN))
+
+
+async def setup_enroller(
+    args: argparse.Namespace, printer: console.Printer
+) -> enroll_app.AutoEnroller | None:
+    """視 .env 的帳密決定要不要啟用自動加選。
+
+    Args:
+        args: 已解析的命令列參數。
+        printer: 輸出器，登入結果要讓使用者看到。
+
+    Returns:
+        登入成功的自動加選器；開關關掉、沒帳密、加了 --no-enroll 或登入
+        失敗時為 None。
+
+    Raises:
+        config.ConfigError: AUTO_ENROLL 寫了無法辨識的值。
+    """
+    if args.no_enroll:
+        return None
+    if not config.auto_enroll_enabled():
+        return None  # 自己關掉的功能不需要每次啟動都被提醒一次。
+
+    student_id, password = config.credentials()
+    if not (student_id and password):
+        printer.line(printer.color(
+            "（未設定 STUDENT_ID/PASSWORD，不啟用自動加選）", console.DIM))
+        return None
+
+    printer.line(printer.color(
+        f"正在登入選課系統（{student_id}）...", console.CYAN))
+    selector = await enroll_app.login_selector(student_id, password)
+    if selector is None:
+        printer.line(printer.color(
+            "選課系統登入失敗，自動加選停用。", console.RED))
+        return None
+
+    period = periods.get_current_period()
+    printer.line(printer.color(
+        f"自動加選已啟用（目前時段：{periods.get_period_name(period)}）"
+        if period in periods.SELECTION_PERIODS else
+        f"自動加選已啟用，但目前是{periods.get_period_name(period)}，"
+        "偵測到空位也不會送出。", console.GREEN))
+    return enroll_app.AutoEnroller(selector=selector)

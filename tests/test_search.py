@@ -106,3 +106,27 @@ def test_semester_falls_back_when_probe_is_empty(
 
     assert semester == "1142"
     assert "1142" in note
+
+
+def _vacancy_course(course_no: str, cur: int, limit: int = 55) -> models.Course:
+    return models.Course(course_no, "計算機程式設計", "姚智原", cur, limit,
+                         ("W6", "W7"))
+
+
+def test_collect_vacant_skips_full_and_department_full() -> None:
+    class _Client:
+        async def get_department_limit(self, semester, course_no, dept):
+            return (12, 12) if course_no == "DEPT" else None
+
+    result = search.SearchResult(
+        matches=[
+            search.Match(_vacancy_course("FULL", 55, 55)),
+            search.Match(_vacancy_course("DEPT", 40, 55), dept="資訊工程系三"),
+            search.Match(_vacancy_course("OPEN", 40, 55)),
+        ],
+        counts=[3],
+    )
+
+    vacant = asyncio.run(search.collect_vacant(_Client(), result, "1151"))
+
+    assert [course.course_no for course, _ in vacant] == ["OPEN"]

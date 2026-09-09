@@ -3,6 +3,7 @@
 import datetime
 import time
 
+from ntust_class_notifier.app import enroll as enroll_app
 from ntust_class_notifier.app import monitor
 from ntust_class_notifier.app import search
 from ntust_class_notifier.clients import course_api
@@ -20,6 +21,7 @@ async def watch(
     interval: float,
     printer: console.Printer,
     list_all: bool = False,
+    enroller: enroll_app.AutoEnroller | None = None,
 ) -> None:
     """持續監看課程人數，只輸出有變動的部分。
 
@@ -30,6 +32,7 @@ async def watch(
         interval: 每輪週期秒數。
         printer: 輸出器。
         list_all: 啟動時是否列出全部課程。
+        enroller: 自動加選器，None 代表只監看不加選。
     """
     previous: dict[str, models.Course] = {}
     filters: dict[str, search.Match] = {}
@@ -58,13 +61,26 @@ async def watch(
             match.course.course_no: match for match in result.matches
         }
 
-        if not previous:
+        first_round = not previous
+        if first_round:
             if not current:
                 report.print_rules(printer, parsed, result.counts, semester)
                 report.zero_result_hint(printer, parsed, semester)
                 return
             _print_header(printer, current, parsed, result.counts, semester,
                           interval, list_all)
+
+        # 第一輪就有空位也要搶，所以放在印完表頭之後、比對變動之前。
+        # 空位一定要用扣掉系所名額的版本：拿總人數的假空位去加選不只白送
+        # 請求，還會讓那門課留在 previous 裡，名額真的釋出時反而不搶了。
+        if enroller:
+            vacant = await search.collect_vacant(client, result, semester)
+            notes = await enroller.on_round(
+                {course.course_no for course, _ in vacant})
+            for note in notes:
+                printer.line(printer.color(f"[{now}] {note}", console.GREEN))
+
+        if first_round:
             previous = current
             announced = await monitor.pace(interval, started)
             if announced > interval:

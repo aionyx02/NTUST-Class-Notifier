@@ -8,6 +8,7 @@ import datetime
 import logging
 import time
 
+from ntust_class_notifier.app import enroll as enroll_app
 from ntust_class_notifier.app import monitor
 from ntust_class_notifier.app import search
 from ntust_class_notifier.clients import course_api
@@ -37,6 +38,7 @@ class Watcher:
         printer: 終端機輸出器。
         sound: 是否播放提示音。
         list_all: 啟動時是否列出全部課程。
+        enroller: 自動加選器，None 代表只提醒不加選。
         had_vacancy: 每門課上一輪是否有空位。
         alerts: 已經提醒過幾次。
         rounds: 已經跑過幾輪。
@@ -50,6 +52,7 @@ class Watcher:
     printer: console.Printer
     sound: bool = True
     list_all: bool = False
+    enroller: enroll_app.AutoEnroller | None = None
     had_vacancy: dict[str, bool] = dataclasses.field(default_factory=dict)
     alerts: int = 0
     rounds: int = 0
@@ -148,8 +151,9 @@ class Watcher:
             printer.line(printer.color(
                 f"   課程超過 {ruleset.DEPT_LOOKUP_LIMIT} 門，"
                 f"已跳過系所名額檢查", console.YELLOW))
+        tail = "並自動送出加選" if self.enroller else "（不會自動加選）"
         printer.line(printer.color(
-            "── 之後只在課程「由額滿變成有空位」時提醒（不會自動加選）──",
+            f"── 之後只在課程「由額滿變成有空位」時提醒{tail} ──",
             console.CYAN))
 
     async def check_vacancy(
@@ -221,6 +225,17 @@ class Watcher:
                 (match, *await self.check_vacancy(match, dept_allowed))
                 for match in result.matches
             ]
+
+            # 空位判斷已經扣掉系所額滿的假空位，直接拿來加選最準。
+            if self.enroller:
+                notes = await self.enroller.on_round({
+                    match.course.course_no
+                    for match, has_vacancy, _ in checked if has_vacancy
+                })
+                for note in notes:
+                    self.printer.line(self.printer.color(
+                        f"[{datetime.datetime.now():%H:%M:%S}] {note}",
+                        console.GREEN))
 
             if self.rounds == 1 and self._handle_first_round(
                     checked, result.counts):

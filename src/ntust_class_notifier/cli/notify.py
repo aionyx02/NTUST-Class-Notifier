@@ -11,6 +11,7 @@ import sys
 import discord
 
 from ntust_class_notifier import config
+from ntust_class_notifier.app import enroll as enroll_app
 from ntust_class_notifier.app import notify
 from ntust_class_notifier.app import search
 from ntust_class_notifier.clients import course_api
@@ -50,14 +51,14 @@ async def login_selector(
         logger.info("未設定 STUDENT_ID/PASSWORD，不啟用自動加選")
         return None
 
-    selector = enrollment.CourseSelector(
+    selector = await enroll_app.login_selector(
         settings.student_id, settings.password)
-    if await enrollment.run_sync(selector.login):
-        logger.info("選課系統自動加選功能已啟用")
-        return selector
+    if selector is None:
+        logger.warning("選課系統登入失敗，自動加選功能停用")
+        return None
 
-    logger.warning("選課系統登入失敗，自動加選功能停用")
-    return None
+    logger.info("選課系統自動加選功能已啟用")
+    return selector
 
 
 def create_bot(
@@ -119,7 +120,8 @@ async def main(settings: config.Settings) -> None:
     tasks = [asyncio.create_task(
         notify.monitor_courses(client, parsed, semester, bot, selector))]
     if selector:
-        tasks.append(asyncio.create_task(notify.session_keepalive(selector)))
+        tasks.append(asyncio.create_task(
+            enroll_app.keep_session_alive(selector)))
     if bot:
         # 一起 gather 才會保留 task 參考，Bot 斷線或 token 錯誤也才看得到。
         tasks.append(asyncio.create_task(bot.start(settings.discord_token)))

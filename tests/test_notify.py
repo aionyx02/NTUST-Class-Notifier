@@ -4,10 +4,12 @@ import asyncio
 
 import pytest
 
+from ntust_class_notifier.app import enroll as enroll_app
 from ntust_class_notifier.app import notify
 from ntust_class_notifier.app import search
 from ntust_class_notifier.clients import sound
 from ntust_class_notifier.core import models
+from ntust_class_notifier.core import periods
 from ntust_class_notifier.core import ruleset
 
 
@@ -39,6 +41,7 @@ def _run_monitor(
     rounds: list[list[models.Course]],
     seconds: float,
     heartbeat: float,
+    selector: object | None = None,
 ) -> _StubBot:
     """跑幾輪監控迴圈並回傳假 Bot。
 
@@ -47,6 +50,7 @@ def _run_monitor(
         rounds: 每一輪要回傳的課程，用完就一直沿用最後一輪。
         seconds: 要讓迴圈跑多久。
         heartbeat: 心跳秒數。
+        selector: 假的選課客戶端，None 代表不自動加選。
 
     Returns:
         收集到訊息的假 Bot。
@@ -67,7 +71,7 @@ def _run_monitor(
 
     async def drive() -> None:
         task = asyncio.create_task(notify.monitor_courses(
-            None, [ruleset.Rule()], "1151", bot, None))
+            None, [ruleset.Rule()], "1151", bot, selector))
         await asyncio.sleep(seconds)
         task.cancel()
 
@@ -105,20 +109,30 @@ def test_monitor_resends_on_heartbeat_only(
     assert all("目前沒有空位" in message for message in bot.sent)
 
 
-def test_collect_vacant_skips_full_and_department_full() -> None:
-    class _Client:
-        async def get_department_limit(self, semester, course_no, dept):
-            return (12, 12) if course_no == "DEPT" else None
+def test_notify_applies_the_same_per_round_cap_as_the_other_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Selector:
+        """只記錄有沒有被要求送出加選。"""
 
-    result = search.SearchResult(
-        matches=[
-            search.Match(_course("FULL", 55, 55)),
-            search.Match(_course("DEPT", 40, 55), dept="資訊工程系三"),
-            search.Match(_course("OPEN", 40, 55)),
-        ],
-        counts=[3],
-    )
+        def __init__(self) -> None:
+            self.sent: list[str] = []
 
-    vacant = asyncio.run(notify.collect_vacant(_Client(), result, "1151"))
+        def select_course(self, course_no: str, period: str):
+            self.sent.append(course_no)
+            return True, ""
 
-    assert [course.course_no for course, _ in vacant] == ["OPEN"]
+        def verify_enrolled(self, course_no: str, period: str) -> bool:
+            return True
+
+    monkeypatch.setattr(periods, "get_current_period", lambda *args: "open")
+    monkeypatch.setattr(enroll_app, "VERIFY_DELAY", 0)
+    flood = [[_course(f"CS100330{i}", 40)
+              for i in range(enroll_app.MAX_PER_ROUND + 1)]]
+    selector = _Selector()
+
+    _run_monitor(monkeypatch, flood, seconds=0.1, heartbeat=10 ** 6,
+                 selector=selector)
+
+    # notify 以前是自己寫迴圈，繞過了上限；規則寫太廣時會連送幾十次加選。
+    assert selector.sent == []
