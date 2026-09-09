@@ -1,6 +1,7 @@
 """搶課監控：課程一出現空位就提醒。
 
-只查詢公開的課程查詢 API，不會登入選課系統、也不會替你送出加選。
+預設只查詢公開的課程查詢 API；.env 明確設定 AUTO_ENROLL=true 又填了帳密
+時，會連同自動加選一起做（跟 ntust-watch、ntust-notify 同一套規則）。
 """
 
 import dataclasses
@@ -68,17 +69,17 @@ class Watcher:
             sound.play_sound(sound_type)
 
     def selection_link(self) -> str:
-        """依目前時段回傳選課系統連結。
+        """依今天落在哪一段選課時程回傳選課系統連結。
+
+        看的是日期而不是「現在收不收加選」：半夜看到提醒的人還是需要那個
+        網址，明天九點才點得下去。
 
         Returns:
-            對應時段的網址；非選課時段時兩個都給。
+            對應時段的網址；日期不在任何選課時程內時兩個都給。
         """
-        period = periods.get_current_period()
-        if period == "dept":
-            return periods.DEPT_SELECT_LINK
-        if period == "open":
-            return periods.OPEN_SELECT_LINK
-        return f"{periods.DEPT_SELECT_LINK} / {periods.OPEN_SELECT_LINK}"
+        # 連結看的是「今天屬於哪一段」，不是「現在收不收加選」：晚上看到
+        # 提醒的人還是需要那個網址，明天九點才點得下去。
+        return periods.get_period_link(periods.get_scheduled_period())
 
     def status(self, courses: list[models.Course]) -> None:
         """更新底部狀態列。
@@ -142,10 +143,9 @@ class Watcher:
                 f"   （課程超過 {report.LIST_LIMIT} 門，清單省略；"
                 f"加 --list 可列出全部）", console.CYAN))
 
-        period = periods.get_current_period()
         printer.line(
             f"   目前有空位：{printer.color(str(vacant), console.GREEN)} 門　"
-            f"目前時段：{periods.get_period_name(period)}"
+            f"目前時段：{periods.describe()}"
         )
         if self.dept_skipped:
             printer.line(printer.color(

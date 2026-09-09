@@ -8,6 +8,7 @@ import datetime
 
 from ntust_class_notifier.core import changes
 from ntust_class_notifier.core import models
+from ntust_class_notifier.core import periods
 from ntust_class_notifier.core import ruleset
 from ntust_class_notifier.ui import console
 
@@ -179,9 +180,9 @@ def startup_message(
     parts = [code_block(lines)]
     if auto_enroll:
         parts.append(
-            "自動加選已啟用（電選課加選與全校加退選期間偵測到空位將自動送出）"
+            f"自動加選已啟用（{periods.describe()}；只在開放時間內送出）"
         )
     parts.append(
-        "人數一有變動就更新，這則訊息會被直接取代，聊天室永遠只有一則。"
+        "人數一有變動就更新，這則訊息會被直接編輯，聊天室永遠只有一則。"
     )
     return "\n".join(parts)
