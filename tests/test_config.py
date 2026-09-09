@@ -88,3 +88,46 @@ def test_data_dir_honours_env_var(
 
     assert config.data_dir() == target
     assert target.is_dir()  # 不存在時要自己建立。
+
+
+def test_auto_enroll_defaults_to_on_when_credentials_exist(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    clean_env.setenv("STUDENT_ID", "B11215000")
+    clean_env.setenv("PASSWORD", "pw")
+
+    # 沒寫 AUTO_ENROLL 就維持舊行為，不會突然不幫忙加選。
+    assert config.Settings.from_env().selector_enabled is True
+
+
+def test_auto_enroll_false_keeps_the_credentials_but_disables_enrolling(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    clean_env.setenv("STUDENT_ID", "B11215000")
+    clean_env.setenv("PASSWORD", "pw")
+    clean_env.setenv("AUTO_ENROLL", "false")
+
+    settings = config.Settings.from_env()
+
+    assert settings.selector_enabled is False
+    assert settings.student_id == "B11215000"  # 不必刪掉帳密就能關掉。
+
+
+def test_auto_enroll_accepts_the_usual_spellings(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    for raw in ("true", "TRUE", "1", "yes", "on"):
+        clean_env.setenv("AUTO_ENROLL", raw)
+        assert config.auto_enroll_enabled() is True
+    for raw in ("false", "False", "0", "no", "off"):
+        clean_env.setenv("AUTO_ENROLL", raw)
+        assert config.auto_enroll_enabled() is False
+
+
+def test_auto_enroll_rejects_anything_else(
+    clean_env: pytest.MonkeyPatch,
+) -> None:
+    clean_env.setenv("AUTO_ENROLL", "maybe")
+
+    with pytest.raises(config.ConfigError, match="AUTO_ENROLL"):
+        config.auto_enroll_enabled()

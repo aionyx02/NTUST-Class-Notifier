@@ -14,6 +14,13 @@ import dotenv
 # 篩選規則的變數名；另接受 LOOK_UP_CLASSES_1、_2… 等編號變數。
 RULE_VAR = "LOOK_UP_CLASSES"
 
+# 自動加選的總開關，填 true/false。
+AUTO_ENROLL_VAR = "AUTO_ENROLL"
+
+# 開關接受的寫法，大小寫不拘。
+_TRUE = frozenset({"true", "1", "yes", "y", "on"})
+_FALSE = frozenset({"false", "0", "no", "n", "off"})
+
 # 執行期資料（cookie 等）的存放目錄，可用環境變數覆寫。
 DATA_DIR_VAR = "NTUST_DATA_DIR"
 DEFAULT_DATA_DIR = pathlib.Path.home() / ".ntust-class-notifier"
@@ -69,6 +76,48 @@ def look_up_classes() -> str:
     return ";".join(value.strip() for value in values if value.strip())
 
 
+def auto_enroll_enabled() -> bool:
+    """讀取自動加選開關。
+
+    沒有設定時維持舊行為：只要填了帳密就啟用。想關掉就寫
+    `AUTO_ENROLL=false`，不必把帳密刪掉。
+
+    Returns:
+        是否啟用自動加選。
+
+    Raises:
+        ConfigError: 開關寫了無法辨識的值。
+    """
+    load_env()
+    raw = os.environ.get(AUTO_ENROLL_VAR, "").strip().lower()
+    if not raw:
+        return True
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    raise ConfigError(
+        f"{AUTO_ENROLL_VAR} 只能填 true 或 false，目前是：{raw}"
+    )
+
+
+def credentials() -> tuple[str, str]:
+    """讀取選課系統帳密。
+
+    三支指令都要判斷「有沒有要自動加選」，但只有 ntust-notify 需要完整的
+    Settings，所以這裡單獨提供帳密，免得 watch/alert 為了讀帳密而被不相干
+    的 Discord 設定錯誤擋下來。
+
+    Returns:
+        (學號, 密碼)；沒有設定時為空字串。
+    """
+    load_env()
+    return (
+        os.environ.get("STUDENT_ID", "").strip(),
+        os.environ.get("PASSWORD", ""),
+    )
+
+
 def parse_target_ids(raw: str) -> tuple[int, ...]:
     """把收件對象字串拆成 ID。
 
@@ -100,6 +149,7 @@ class Settings:
         discord_target_ids: 收件對象 ID，可為伺服器、頻道或使用者。
         student_id: 選課系統學號，空字串代表不啟用自動加選。
         password: 選課系統密碼。
+        auto_enroll: 自動加選的總開關。
     """
 
     look_up_classes: str = ""
@@ -107,6 +157,7 @@ class Settings:
     discord_target_ids: tuple[int, ...] = ()
     student_id: str = ""
     password: str = ""
+    auto_enroll: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -124,12 +175,14 @@ class Settings:
             # 舊名稱，保留相容。
             or os.environ.get("DISCORD_TARGET_USER_IDS", "")
         )
+        student_id, password = credentials()
         return cls(
             look_up_classes=look_up_classes(),
             discord_token=os.environ.get("DISCORD_BOT_TOKEN", ""),
             discord_target_ids=parse_target_ids(raw_ids),
-            student_id=os.environ.get("STUDENT_ID", ""),
-            password=os.environ.get("PASSWORD", ""),
+            student_id=student_id,
+            password=password,
+            auto_enroll=auto_enroll_enabled(),
         )
 
     @property
@@ -139,5 +192,5 @@ class Settings:
 
     @property
     def selector_enabled(self) -> bool:
-        """有學號也有密碼時才會登入選課系統。"""
-        return bool(self.student_id and self.password)
+        """開關沒關掉、而且帳密都有填時才會登入選課系統。"""
+        return bool(self.auto_enroll and self.student_id and self.password)
