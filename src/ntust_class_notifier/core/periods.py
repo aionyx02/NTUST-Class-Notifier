@@ -14,6 +14,9 @@ PERIOD_OPEN_SELECT = (datetime.date(2026, 9, 7), datetime.date(2026, 9, 21))
 DEPT_SELECT_LINK = "https://courseselection.ntust.edu.tw/First/A06/A06"
 OPEN_SELECT_LINK = "https://courseselection.ntust.edu.tw/AddAndSub/B01/B01"
 
+# 會送出加選的時段；其餘時段（"unknown"）選課系統根本不收加選。
+SELECTION_PERIODS = ("dept", "open")
+
 _PERIOD_NAMES = {"dept": "電選課加選", "open": "全校加退選"}
 
 
