@@ -1,8 +1,8 @@
 name: Release
 
-# 版本規則：每個 feat commit 讓次版號 +0.1.0、每個 fix commit 讓修訂號
-# +0.0.1，兩者累加。主版號（1.0.0 這種）永遠不會自動跳，只能由人從
-# Actions 頁面手動觸發並填版本號。
+# 版本規則（SemVer）：一次 push 只跳一級——這批 commit 裡有 feat 就次版號
+# +1、修訂號歸零；只有 fix 就修訂號 +1。commit 有幾個不影響跳幾級。主版號
+# （1.0.0 這種）永遠不會自動跳，只能由人從 Actions 頁面手動觸發並填版本號。
 on:
   push:
     branches: [main]
@@ -75,7 +75,13 @@ jobs:
               exit 0
             fi
 
-            new="$major.$((minor + feats)).$((patch + fixes))"
+            # 有 feat 就是次版號，其餘（只有 fix）是修訂號；次版號跳動時
+            # 修訂號一定歸零，這是 SemVer 的規矩。
+            if [ "$feats" -gt 0 ]; then
+              new="$major.$((minor + 1)).0"
+            else
+              new="$major.$minor.$((patch + 1))"
+            fi
             echo "自動計算版本：$current → $new"
           fi
 
