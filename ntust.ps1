@@ -32,7 +32,8 @@
     刪除已儲存的帳密後結束。
 
 .PARAMETER UseEnvSwitch
-    不要覆寫 AUTO_ENROLL，完全照 .env 的設定。
+    不要覆寫 AUTO_ENROLL，要不要自動加選完全照 .env 的設定。帳密仍會用加密
+    檔裡存的那一組（有的話），它會蓋過 .env 的 STUDENT_ID／PASSWORD。
 
 .PARAMETER DryRun
     只印出實際會執行的指令，不真的執行，也不會提示輸入密碼。
@@ -183,14 +184,21 @@ if ($needsCredentials) {
     if ($credential) {
         $credentialSource = "加密檔（$($credential.UserName)）"
     }
-    elseif (-not $StudentId -and
+    elseif (-not $StudentId -and -not $SaveCredential -and
             (Test-DotEnvCredentials -Directories @($PWD.Path, $root))) {
+        # .env 已經有帳密就直接用，不必多問。但 -SaveCredential 是明講「我要
+        # 存進加密檔」，那就得真的問一次——.env 只驗得出「有沒有填」，讀不出
+        # 密碼，不問就沒有東西可以存。
         $credentialSource = '.env'
     }
     elseif ($UseEnvSwitch -and -not $SaveCredential) {
         # 照 .env 決定時不主動問密碼：.env 可能根本沒打開自動加選，為了一個
-        # 不會用到的功能跳出提示很擾人。但 -SaveCredential 是明講「我要存帳
-        # 密」，那就不能靜靜地什麼都不做——所以這裡要把它排除掉。
+        # 不會用到的功能跳出提示很擾人。（-SaveCredential 例外，見上面。）
+        if ($StudentId) {
+            # 不說的話會安安靜靜地用 .env 裡的另一個帳號去加選。
+            Write-Warning ("找不到 $StudentId 的加密帳密；-UseEnvSwitch " +
+                '不會提示輸入，這次會照 .env 裡的帳號跑。')
+        }
         $credentialSource = '依 .env'
     }
     elseif ($DryRun) {
