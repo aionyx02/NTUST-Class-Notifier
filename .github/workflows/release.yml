@@ -121,11 +121,14 @@ jobs:
           sed -i -E "0,/^version = \".*\"/s//version = \"$VERSION\"/" \
             pyproject.toml
           grep -n '^version' pyproject.toml
+          # uv.lock 也記著專案版號，不一起更新的話它會一直落後，下一個跑
+          # uv 的人就會莫名其妙撿到一個髒掉的工作目錄。
+          uv lock
 
           git config user.name "github-actions[bot]"
           git config user.email \
             "41898282+github-actions[bot]@users.noreply.github.com"
-          git add pyproject.toml
+          git add pyproject.toml uv.lock
           # pyproject 可能本來就已經是這個版本（例如第一次發布時人工先對
           # 齊過），這時沒有東西可以 commit，但 tag 還是要打。
           if git diff --cached --quiet; then
