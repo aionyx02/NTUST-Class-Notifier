@@ -224,11 +224,14 @@ else {
 }
 $uvArgs += $Rest
 
-$enrollState = if ($UseEnvSwitch) { '依 .env' }
-    elseif ($AutoEnroll) { '啟用' } else { '關閉' }
 Write-Host "來源：$source" -ForegroundColor DarkGray
-Write-Host "自動加選：$enrollState・帳密：$credentialSource" `
-    -ForegroundColor DarkGray
+# 沒開自動加選就整行不印（連「關閉」都不印）：這支腳本是拿來下載執行、也拿
+# 來展示的，畫面上不需要出現一個沒有在運作的功能。
+if ($UseEnvSwitch -or $AutoEnroll) {
+    $enrollState = if ($UseEnvSwitch) { '依 .env' } else { '啟用' }
+    Write-Host "自動加選：$enrollState・帳密：$credentialSource" `
+        -ForegroundColor DarkGray
+}
 
 if ($DryRun) {
     Write-Host "uv $($uvArgs -join ' ')"
