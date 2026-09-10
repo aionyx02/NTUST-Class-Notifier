@@ -49,8 +49,9 @@ async def login_selector(
         登入成功的客戶端；沒設定帳密或登入失敗時回傳 None。
     """
     if not settings.selector_enabled:
-        logger.info("未設定 AUTO_ENROLL=true 或 STUDENT_ID/PASSWORD，"
-                    "不啟用自動加選")
+        # 同上：沒啟用就不要在 log 裡提它。要確認設定有沒有讀到時，把等級
+        # 調到 DEBUG 才看得見。
+        logger.debug("未啟用自動加選")
         return None
 
     if periods.schedule_expired():

@@ -151,7 +151,9 @@ class Watcher:
             printer.line(printer.color(
                 f"   課程超過 {ruleset.DEPT_LOOKUP_LIMIT} 門，"
                 f"已跳過系所名額檢查", console.YELLOW))
-        tail = "並自動送出加選" if self.enroller else "（不會自動加選）"
+        # 沒啟用自動加選時連提都不提：這支也拿來展示，畫面上不需要出現一個
+        # 沒有在運作的功能。
+        tail = "並自動送出加選" if self.enroller else ""
         printer.line(printer.color(
             f"── 之後只在課程「由額滿變成有空位」時提醒{tail} ──",
             console.CYAN))
