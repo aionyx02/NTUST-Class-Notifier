@@ -132,7 +132,7 @@ jobs:
           # pyproject 可能本來就已經是這個版本（例如第一次發布時人工先對
           # 齊過），這時沒有東西可以 commit，但 tag 還是要打。
           if git diff --cached --quiet; then
-            echo "pyproject.toml 已經是 $VERSION，跳過版本 commit"
+            echo "版本檔已經是 $VERSION，跳過版本 commit"
           else
             # [skip ci] 只是省一次 CI；就算再跑一輪，這個 commit 不是
             # feat/fix，版本計算會直接判定不用發布。
