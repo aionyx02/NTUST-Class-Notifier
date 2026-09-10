@@ -79,7 +79,9 @@ uv sync
 ```
 
 取得順序是 `-StudentId`／提示輸入 → 加密檔 → `.env`；`.env` 已經備齊帳密時
-不會多問。**沒有 `-Password` 這個參數**：PowerShell 會把每一行指令原文寫進
+不會多問。`-UseEnvSwitch` 例外：它只用加密檔或 `.env`，不會提示輸入——那個
+模式由 `.env` 決定要不要加選，為了一個可能用不到的功能問密碼太擾人（真的要
+存就同時加 `-SaveCredential`）。**沒有 `-Password` 這個參數**：PowerShell 會把每一行指令原文寫進
 `ConsoleHost_history.txt` 永久保存，密碼一律用 `Read-Host -AsSecureString`
 輸入，並以環境變數交給子行程，不會出現在歷史紀錄或行程命令列裡。
 `-SaveCredential` 存的檔在 `%LOCALAPPDATA%\ntust-class-notifier\`，用 Windows

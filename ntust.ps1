@@ -8,7 +8,9 @@
 
     自動加選預設關閉。加 -AutoEnroll 才會登入選課系統。
 
-    帳密的取得順序：-StudentId／提示輸入 > 加密儲存的帳密 > .env。密碼一律
+    帳密的取得順序：-StudentId／提示輸入 > 加密儲存的帳密 > .env；
+    -UseEnvSwitch 例外，它只用加密檔或 .env，不會提示輸入（除非同時加了
+    -SaveCredential）。密碼一律
     用 Read-Host -AsSecureString 輸入，不會出現在 PowerShell 的歷史紀錄
     （ConsoleHost_history.txt）或行程命令列裡。加 -SaveCredential 才會存
     檔，且用 Windows DPAPI 加密——只有你這個 Windows 帳號、在這台機器上解
@@ -158,10 +160,11 @@ while ($root -and -not (Test-Path (Join-Path $root 'pyproject.toml'))) {
     $root = if ($parent -eq $root) { $null } else { $parent }
 }
 
-# 只有跟自動加選有關時才碰帳密。-UseEnvSwitch 也要進來：帳密可能只存在
-# 加密檔裡（.env 沒有），不載入的話 .env 就算開了 AUTO_ENROLL 也不會送出。
+# 只有跟自動加選有關時才碰帳密。-UseEnvSwitch 也算：帳密可能只存在加密檔裡
+# （.env 沒有），不載入的話 .env 就算開了 AUTO_ENROLL 也不會送出。
+$needsCredentials = $AutoEnroll -or $SaveCredential -or $UseEnvSwitch
 $credentialSource = '不需要'
-if ($AutoEnroll -or $SaveCredential -or $UseEnvSwitch) {
+if ($needsCredentials) {
     $credential = $null
     if (Test-Path $CredentialPath) {
         try {
@@ -184,9 +187,10 @@ if ($AutoEnroll -or $SaveCredential -or $UseEnvSwitch) {
             (Test-DotEnvCredentials -Directories @($PWD.Path, $root))) {
         $credentialSource = '.env'
     }
-    elseif ($UseEnvSwitch) {
+    elseif ($UseEnvSwitch -and -not $SaveCredential) {
         # 照 .env 決定時不主動問密碼：.env 可能根本沒打開自動加選，為了一個
-        # 不會用到的功能跳出提示很擾人。
+        # 不會用到的功能跳出提示很擾人。但 -SaveCredential 是明講「我要存帳
+        # 密」，那就不能靜靜地什麼都不做——所以這裡要把它排除掉。
         $credentialSource = '依 .env'
     }
     elseif ($DryRun) {
@@ -233,11 +237,14 @@ $uvArgs += $Rest
 Write-Host "來源：$source" -ForegroundColor DarkGray
 # 沒開自動加選就整行不印（連「關閉」都不印）：這支腳本是拿來下載執行、也拿
 # 來展示的，畫面上不需要出現一個沒有在運作的功能。
-if ($UseEnvSwitch -or $AutoEnroll -or $SaveCredential) {
-    $enrollState = if ($UseEnvSwitch) { '依 .env' }
-        elseif ($AutoEnroll) { '啟用' } else { '關閉' }
+if ($UseEnvSwitch -or $AutoEnroll) {
+    $enrollState = if ($UseEnvSwitch) { '依 .env' } else { '啟用' }
     Write-Host "自動加選：$enrollState・帳密：$credentialSource" `
         -ForegroundColor DarkGray
+}
+elseif ($SaveCredential) {
+    # 這一次只是存帳密、不會加選，那就連「關閉」都不必說。
+    Write-Host "帳密：$credentialSource" -ForegroundColor DarkGray
 }
 
 if ($DryRun) {
