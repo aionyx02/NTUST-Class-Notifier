@@ -158,9 +158,10 @@ while ($root -and -not (Test-Path (Join-Path $root 'pyproject.toml'))) {
     $root = if ($parent -eq $root) { $null } else { $parent }
 }
 
-# 只有真的要自動加選（或明講要存帳密）時才碰帳密。
+# 只有跟自動加選有關時才碰帳密。-UseEnvSwitch 也要進來：帳密可能只存在
+# 加密檔裡（.env 沒有），不載入的話 .env 就算開了 AUTO_ENROLL 也不會送出。
 $credentialSource = '不需要'
-if ($AutoEnroll -or $SaveCredential) {
+if ($AutoEnroll -or $SaveCredential -or $UseEnvSwitch) {
     $credential = $null
     if (Test-Path $CredentialPath) {
         try {
@@ -182,6 +183,11 @@ if ($AutoEnroll -or $SaveCredential) {
     elseif (-not $StudentId -and
             (Test-DotEnvCredentials -Directories @($PWD.Path, $root))) {
         $credentialSource = '.env'
+    }
+    elseif ($UseEnvSwitch) {
+        # 照 .env 決定時不主動問密碼：.env 可能根本沒打開自動加選，為了一個
+        # 不會用到的功能跳出提示很擾人。
+        $credentialSource = '依 .env'
     }
     elseif ($DryRun) {
         $credentialSource = '會提示輸入'
@@ -227,8 +233,9 @@ $uvArgs += $Rest
 Write-Host "來源：$source" -ForegroundColor DarkGray
 # 沒開自動加選就整行不印（連「關閉」都不印）：這支腳本是拿來下載執行、也拿
 # 來展示的，畫面上不需要出現一個沒有在運作的功能。
-if ($UseEnvSwitch -or $AutoEnroll) {
-    $enrollState = if ($UseEnvSwitch) { '依 .env' } else { '啟用' }
+if ($UseEnvSwitch -or $AutoEnroll -or $SaveCredential) {
+    $enrollState = if ($UseEnvSwitch) { '依 .env' }
+        elseif ($AutoEnroll) { '啟用' } else { '關閉' }
     Write-Host "自動加選：$enrollState・帳密：$credentialSource" `
         -ForegroundColor DarkGray
 }
