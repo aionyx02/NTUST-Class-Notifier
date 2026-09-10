@@ -5,26 +5,8 @@ import pytest
 from ntust_class_notifier.app import alert as alert_app
 from ntust_class_notifier.app import search
 from ntust_class_notifier.core import models
-from ntust_class_notifier.core import periods
 from ntust_class_notifier.core import ruleset
 from ntust_class_notifier.ui import console
-
-
-@pytest.fixture
-def steady_period(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """固定時段說明。
-
-    表頭會印出目前時段，而「電選課加選」這個名字本身就含「加選」兩個字，
-    不固定住的話這個測試會隨今天是哪一天而時好時壞。
-
-    Args:
-        monkeypatch: pytest 的替換工具。
-
-    Returns:
-        同一個 monkeypatch。
-    """
-    monkeypatch.setattr(periods, "describe", lambda *args: "非選課時段")
-    return monkeypatch
 
 
 def _watcher(enroller: object | None) -> alert_app.Watcher:
@@ -57,18 +39,19 @@ def _checked() -> list[tuple[search.Match, bool, str]]:
 
 
 def test_header_says_nothing_about_enrolling_when_it_is_off(
-    steady_period: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _watcher(None).print_header(_checked(), [1])
 
     # 這支也拿來展示，畫面上不該出現一個沒有在運作的功能——連「不會自動
-    # 加選」這種否定句都算。
-    assert "加選" not in capsys.readouterr().out
+    # 加選」這種否定句都算。表頭仍會印「目前時段：電選課加選」，但那是學校
+    # 的階段名稱，跟這支程式有沒有加選功能無關，所以只挑真正會洩漏的字串。
+    out = capsys.readouterr().out
+    assert "不會自動加選" not in out
+    assert "自動送出加選" not in out
 
 
 def test_header_says_so_when_enrolling_is_on(
-    steady_period: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     _watcher(object()).print_header(_checked(), [1])

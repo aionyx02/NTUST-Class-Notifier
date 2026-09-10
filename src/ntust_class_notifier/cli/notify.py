@@ -46,12 +46,21 @@ async def login_selector(
         settings: .env 設定。
 
     Returns:
-        登入成功的客戶端；沒設定帳密或登入失敗時回傳 None。
+        登入成功的客戶端；開關沒打開、沒設定帳密、內建時程過期或登入失敗
+        時回傳 None。
     """
-    if not settings.selector_enabled:
-        # 同上：沒啟用就不要在 log 裡提它。要確認設定有沒有讀到時，把等級
-        # 調到 DEBUG 才看得見。
+    if not settings.auto_enroll:
+        # 開關沒打開就不要在 log 裡提它：這支也拿來展示，不需要讓人知道有
+        # 一個沒在運作的功能。（這支的 log 等級寫死 INFO 也沒有 -d，所以
+        # 這行實務上只有改 setup_logging() 才看得到。）
         logger.debug("未啟用自動加選")
+        return None
+
+    if not settings.selector_enabled:
+        # 走到這裡代表開關是開的，所以缺的一定是帳號或密碼——那是設定錯誤，
+        # 一定要講：不講的話整場選課都不會送出，使用者卻以為它正在幫忙搶。
+        logger.warning("已設定 AUTO_ENROLL=true，但缺少 STUDENT_ID 或 "
+                       "PASSWORD，不啟用自動加選")
         return None
 
     if periods.schedule_expired():
